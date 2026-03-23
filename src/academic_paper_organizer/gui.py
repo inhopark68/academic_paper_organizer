@@ -13,8 +13,14 @@ from tkinter import filedialog, messagebox, ttk
 
 from watchdog.observers import Observer
 
-from .core import PDFCreatedHandler, PaperIndex, PaperOrganizer, run_reindex, scan_existing_pdfs
-from .settings import AppSettings
+from academic_paper_organizer.core import (
+    PDFCreatedHandler,
+    PaperIndex,
+    PaperOrganizer,
+    run_reindex,
+    scan_existing_pdfs,
+)
+from academic_paper_organizer.settings import AppSettings
 
 
 class OrganizerGUI:
