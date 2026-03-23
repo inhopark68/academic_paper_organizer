@@ -1,0 +1,3 @@
+[console_scripts]
+paper-organizer = academic_paper_organizer.core:main
+paper-organizer-gui = academic_paper_organizer.gui:main

@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "academic-paper-organizer"
+version = "0.3.0"
+description = "Automatically rename and classify downloaded academic paper PDFs"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "OpenAI" }
+]
+dependencies = [
+  "PyMuPDF>=1.24.0",
+  "requests>=2.31.0",
+  "watchdog>=4.0.0"
+]
+
+[project.scripts]
+paper-organizer = "academic_paper_organizer.core:main"
+paper-organizer-gui = "academic_paper_organizer.gui:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
