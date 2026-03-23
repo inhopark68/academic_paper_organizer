@@ -618,6 +618,45 @@ def make_snippet(text: str, keyword: str, width: int = 180) -> str:
     return snippet
 
 
+def build_metadata_for_pdf(file_path: Path, organizer: "PaperOrganizer") -> tuple[str, str, PaperMetadata]:
+    file_hash = compute_file_hash(file_path)
+    pdf_meta = extract_pdf_metadata(file_path)
+    text = extract_text_from_pdf(file_path, max_pages=5)
+    doi = extract_doi(text, pdf_meta)
+
+    crossref_data = fetch_crossref_metadata(doi) if doi else None
+    if crossref_data:
+        meta = parse_crossref(crossref_data)
+    else:
+        meta = PaperMetadata(
+            doi=doi,
+            title=organizer._guess_title(text, pdf_meta),
+            first_author=organizer._guess_author(pdf_meta),
+            year=guess_year_from_text(text),
+            venue=organizer._guess_venue(text, pdf_meta),
+        )
+
+    meta.field_code = classify_field(
+        text=text,
+        title=meta.title,
+        abstract=meta.abstract,
+        venue=meta.venue,
+    )
+    return file_hash, text, meta
+
+
+def index_pdf_record(
+    organizer: "PaperOrganizer",
+    file_path: Path,
+    file_hash: Optional[str],
+    meta: PaperMetadata,
+    text: str,
+) -> None:
+    organizer.paper_index.upsert(file_path, file_hash, meta, text)
+    if meta.doi:
+        organizer.doi_index.set(meta.doi, str(file_path))
+
+
 class PaperOrganizer:
     def __init__(
         self,
@@ -665,7 +704,7 @@ class PaperOrganizer:
             if not stable:
                 meta.field_code = "ETC"
                 moved_path = self._move_to_review(file_path, reason="file_not_stable")
-                self.paper_index.upsert(moved_path, file_hash, meta, text)
+                index_pdf_record(self, moved_path, file_hash, meta, text)
                 self.logger.log(
                     status="REVIEW",
                     original_path=original_path,
@@ -677,30 +716,14 @@ class PaperOrganizer:
                 self.log(f"[REVIEW] 파일 안정화 실패: {file_path}")
                 return
 
-            file_hash = compute_file_hash(file_path)
-            pdf_meta = extract_pdf_metadata(file_path)
-            text = extract_text_from_pdf(file_path, max_pages=5)
-            doi = extract_doi(text, pdf_meta)
-            meta.doi = doi
-
-            crossref_data = fetch_crossref_metadata(doi) if doi else None
-            if crossref_data:
-                meta = parse_crossref(crossref_data)
-            else:
-                meta.doi = doi
-                meta.title = self._guess_title(text, pdf_meta)
-                meta.first_author = self._guess_author(pdf_meta)
-                meta.year = guess_year_from_text(text)
-                meta.venue = self._guess_venue(text, pdf_meta)
-
-            meta.field_code = classify_field(text=text, title=meta.title, abstract=meta.abstract, venue=meta.venue)
+            file_hash, text, meta = build_metadata_for_pdf(file_path, self)
 
             if meta.doi:
                 existing = self.doi_index.get(meta.doi)
                 if existing:
                     duplicate_target = unique_path(self.duplicate_dir / file_path.name)
                     shutil.move(str(file_path), str(duplicate_target))
-                    self.paper_index.upsert(duplicate_target, file_hash, meta, text)
+                    index_pdf_record(self, duplicate_target, file_hash, meta, text)
                     self.logger.log(
                         status="DUPLICATE",
                         original_path=original_path,
@@ -714,7 +737,7 @@ class PaperOrganizer:
 
             if not meta.title or not meta.year:
                 result_path = self._move_to_review(file_path, reason="metadata_incomplete")
-                self.paper_index.upsert(result_path, file_hash, meta, text)
+                index_pdf_record(self, result_path, file_hash, meta, text)
                 self.logger.log(
                     status="REVIEW",
                     original_path=original_path,
@@ -732,10 +755,7 @@ class PaperOrganizer:
             result_path = unique_path(target_dir / filename)
             shutil.move(str(file_path), str(result_path))
 
-            if meta.doi:
-                self.doi_index.set(meta.doi, str(result_path))
-
-            self.paper_index.upsert(result_path, file_hash, meta, text)
+            index_pdf_record(self, result_path, file_hash, meta, text)
             self.logger.log(
                 status="SUCCESS",
                 original_path=original_path,
@@ -751,7 +771,7 @@ class PaperOrganizer:
             try:
                 if file_path.exists():
                     result_path = self._move_to_review(file_path, reason="exception")
-                    self.paper_index.upsert(result_path, file_hash, meta, text)
+                    index_pdf_record(self, result_path, file_hash, meta, text)
             except Exception:
                 result_path = None
 
@@ -966,33 +986,8 @@ def run_reindex(args: argparse.Namespace, log_fn: Optional[LogFn] = None) -> int
             if any(part in {"LOG"} for part in file_path.parts):
                 continue
             try:
-                file_hash = compute_file_hash(file_path)
-                pdf_meta = extract_pdf_metadata(file_path)
-                text = extract_text_from_pdf(file_path, max_pages=5)
-                doi = extract_doi(text, pdf_meta)
-                crossref_data = fetch_crossref_metadata(doi) if doi else None
-
-                if crossref_data:
-                    meta = parse_crossref(crossref_data)
-                else:
-                    meta = PaperMetadata(
-                        doi=doi,
-                        title=organizer._guess_title(text, pdf_meta),
-                        first_author=organizer._guess_author(pdf_meta),
-                        year=guess_year_from_text(text),
-                        venue=organizer._guess_venue(text, pdf_meta),
-                    )
-
-                meta.field_code = classify_field(
-                    text=text,
-                    title=meta.title,
-                    abstract=meta.abstract,
-                    venue=meta.venue,
-                )
-
-                organizer.paper_index.upsert(file_path, file_hash, meta, text)
-                if meta.doi:
-                    organizer.doi_index.set(meta.doi, str(file_path))
+                file_hash, text, meta = build_metadata_for_pdf(file_path, organizer)
+                index_pdf_record(organizer, file_path, file_hash, meta, text)
                 indexed += 1
             except Exception as e:
                 log(f"[WARN] 인덱싱 실패: {file_path} | {e}")

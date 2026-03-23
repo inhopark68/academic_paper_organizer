@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import json
 import os
 import queue
 import subprocess
-import sys
 import threading
+import time
 import webbrowser
 from collections.abc import Callable
 from pathlib import Path
@@ -14,19 +13,8 @@ from tkinter import filedialog, messagebox, ttk
 
 from watchdog.observers import Observer
 
-from .core import PDFCreatedHandler, PaperIndex, PaperOrganizer, scan_existing_pdfs, run_reindex
-
-
-class GuiLogHandler:
-    def __init__(self, callback: Callable[[str], None]):
-        self.callback = callback
-
-    def write(self, message: str) -> None:
-        if message.strip():
-            self.callback(message.rstrip())
-
-    def flush(self) -> None:
-        return
+from .core import PDFCreatedHandler, PaperIndex, PaperOrganizer, run_reindex, scan_existing_pdfs
+from .settings import AppSettings
 
 
 class OrganizerGUI:
@@ -57,13 +45,16 @@ class OrganizerGUI:
         self.current_sort_column: str | None = None
 
         self.config_path = Path.home() / ".academic_paper_organizer_gui.json"
+        self.gui_log_path: Path | None = None
 
         self._build_ui()
         self._load_settings()
+        self._update_gui_log_path()
         self._update_button_states()
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.after(150, self._drain_log_queue)
+        self.append_log("[GUI] 애플리케이션 시작")
 
     def _build_ui(self) -> None:
         outer = ttk.Frame(self.root, padding=10)
@@ -210,14 +201,36 @@ class OrganizerGUI:
         widget.see("end")
         widget.configure(state="disabled")
 
+    def _update_gui_log_path(self) -> None:
+        output = self.output_var.get().strip()
+        if not output:
+            self.gui_log_path = None
+            return
+
+        try:
+            output_dir = Path(output).expanduser().resolve()
+            log_dir = output_dir / "LOG"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            self.gui_log_path = log_dir / "gui.log"
+        except Exception:
+            self.gui_log_path = None
+
+    def _write_log_file(self, message: str) -> None:
+        if self.gui_log_path is None:
+            return
+
+        try:
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            with self.gui_log_path.open("a", encoding="utf-8") as f:
+                f.write(f"{timestamp} {message}\n")
+        except Exception:
+            pass
+
     def set_status(self, text: str) -> None:
         self.root.after(0, lambda: self.status_var.set(text))
 
     def show_error(self, title: str, message: str) -> None:
         self.root.after(0, lambda: messagebox.showerror(title, message))
-
-    def show_info(self, title: str, message: str) -> None:
-        self.root.after(0, lambda: messagebox.showinfo(title, message))
 
     def pick_watch_dir(self) -> None:
         path = filedialog.askdirectory(title="감시 폴더 선택")
@@ -228,8 +241,11 @@ class OrganizerGUI:
         path = filedialog.askdirectory(title="출력 폴더 선택")
         if path:
             self.output_var.set(path)
+            self._update_gui_log_path()
 
     def append_log(self, message: str) -> None:
+        self._update_gui_log_path()
+        self._write_log_file(message)
         self.log_queue.put(message)
 
     def _drain_log_queue(self) -> None:
@@ -288,38 +304,31 @@ class OrganizerGUI:
 
     def _load_settings(self) -> None:
         try:
-            if not self.config_path.exists():
-                return
-
-            data = json.loads(self.config_path.read_text(encoding="utf-8"))
-            self.watch_var.set(data.get("watch_dir", ""))
-            self.output_var.set(data.get("output_dir", ""))
-            self.limit_var.set(str(data.get("limit", "50")))
-            self.keyword_var.set(data.get("keyword", ""))
-            self.author_var.set(data.get("author", ""))
-            self.year_var.set(data.get("year", ""))
-            self.field_var.set(data.get("field", ""))
-            self.venue_var.set(data.get("venue", ""))
+            settings = AppSettings.load(self.config_path)
+            self.watch_var.set(settings.watch_dir)
+            self.output_var.set(settings.output_dir)
+            self.limit_var.set(settings.limit)
+            self.keyword_var.set(settings.keyword)
+            self.author_var.set(settings.author)
+            self.year_var.set(settings.year)
+            self.field_var.set(settings.field)
+            self.venue_var.set(settings.venue)
         except Exception as exc:
             self.append_log(f"[WARN] 설정 불러오기 실패: {exc}")
 
     def _save_settings(self) -> None:
-        data = {
-            "watch_dir": self.watch_var.get().strip(),
-            "output_dir": self.output_var.get().strip(),
-            "limit": self.limit_var.get().strip() or "50",
-            "keyword": self.keyword_var.get().strip(),
-            "author": self.author_var.get().strip(),
-            "year": self.year_var.get().strip(),
-            "field": self.field_var.get().strip(),
-            "venue": self.venue_var.get().strip(),
-        }
-
+        settings = AppSettings(
+            watch_dir=self.watch_var.get().strip(),
+            output_dir=self.output_var.get().strip(),
+            limit=self.limit_var.get().strip() or "50",
+            keyword=self.keyword_var.get().strip(),
+            author=self.author_var.get().strip(),
+            year=self.year_var.get().strip(),
+            field=self.field_var.get().strip(),
+            venue=self.venue_var.get().strip(),
+        )
         try:
-            self.config_path.write_text(
-                json.dumps(data, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            settings.save(self.config_path)
         except Exception as exc:
             self.append_log(f"[WARN] 설정 저장 실패: {exc}")
 
@@ -331,10 +340,14 @@ class OrganizerGUI:
         watch_dir, output_dir = paths
 
         def task() -> None:
-            organizer = PaperOrganizer(watch_dir=watch_dir, output_dir=output_dir)
+            organizer = PaperOrganizer(
+                watch_dir=watch_dir,
+                output_dir=output_dir,
+                log_fn=self.append_log,
+            )
             try:
                 self.append_log(f"[GUI] 1회 처리 시작: {watch_dir}")
-                scan_existing_pdfs(organizer, watch_dir)
+                scan_existing_pdfs(organizer, watch_dir, log_fn=self.append_log)
                 self.append_log("[GUI] 1회 처리 완료")
                 self.set_status("1회 처리 완료")
             except Exception as exc:
@@ -358,7 +371,11 @@ class OrganizerGUI:
         watch_dir, output_dir = paths
 
         try:
-            self.organizer = PaperOrganizer(watch_dir=watch_dir, output_dir=output_dir)
+            self.organizer = PaperOrganizer(
+                watch_dir=watch_dir,
+                output_dir=output_dir,
+                log_fn=self.append_log,
+            )
             handler = PDFCreatedHandler(self.organizer)
             self.observer = Observer()
             self.observer.schedule(handler, str(watch_dir), recursive=False)
@@ -412,18 +429,14 @@ class OrganizerGUI:
 
             self.append_log(f"[GUI] 재인덱싱 시작: {output_dir}")
 
-            stdout_backup = sys.stdout
-            sys.stdout = GuiLogHandler(self.append_log)
             try:
-                run_reindex(args)
+                run_reindex(args, log_fn=self.append_log)
                 self.append_log("[GUI] 재인덱싱 완료")
                 self.set_status("재인덱싱 완료")
             except Exception as exc:
                 self.append_log(f"[ERROR] 재인덱싱 실패: {exc}")
                 self.set_status("재인덱싱 실패")
                 self.show_error("오류", f"재인덱싱 중 오류가 발생했습니다:\n{exc}")
-            finally:
-                sys.stdout = stdout_backup
 
         self._run_in_thread(task, "재인덱싱 중")
 
@@ -518,7 +531,6 @@ class OrganizerGUI:
         selected = self.tree.selection()
         if not selected:
             return
-
         item = selected[0]
         snippet = self.snippets.get(item, "")
         self._set_text_widget(self.snippet_text, snippet)
@@ -527,34 +539,27 @@ class OrganizerGUI:
         selected = self.tree.selection()
         if not selected:
             return None
-
         values = self.tree.item(selected[0], "values")
         if not values:
             return None
-
         return Path(values[6])
 
     def _selected_doi(self) -> str | None:
         selected = self.tree.selection()
         if not selected:
             return None
-
         values = self.tree.item(selected[0], "values")
         if not values:
             return None
-
         doi = str(values[5]).strip()
         return doi or None
 
     def _normalize_doi_url(self, doi: str) -> str:
         doi = doi.strip()
-
         if doi.startswith("http://") or doi.startswith("https://"):
             return doi
-
         if doi.lower().startswith("doi:"):
             doi = doi[4:].strip()
-
         return f"https://doi.org/{doi}"
 
     def open_selected_file(self) -> None:
@@ -562,11 +567,9 @@ class OrganizerGUI:
         if not path:
             messagebox.showinfo("안내", "먼저 검색 결과에서 파일을 선택해 주세요.")
             return
-
         if not path.exists():
             messagebox.showwarning("경고", "파일이 존재하지 않습니다.")
             return
-
         self._open_path(path)
 
     def open_selected_folder(self) -> None:
@@ -574,12 +577,10 @@ class OrganizerGUI:
         if not path:
             messagebox.showinfo("안내", "먼저 검색 결과에서 파일을 선택해 주세요.")
             return
-
         target = path.parent
         if not target.exists():
             messagebox.showwarning("경고", f"폴더가 존재하지 않습니다: {target}")
             return
-
         self._open_path(target)
 
     def open_selected_doi(self) -> None:
@@ -594,19 +595,18 @@ class OrganizerGUI:
             return
 
         try:
-            url = self._normalize_doi_url(doi)
-            webbrowser.open(url)
+            webbrowser.open(self._normalize_doi_url(doi))
         except Exception as exc:
             messagebox.showerror("오류", f"DOI 열기에 실패했습니다: {exc}")
 
     def _open_path(self, path: Path) -> None:
         try:
-            if sys.platform.startswith("win"):
+            if os.name == "nt":
                 os.startfile(str(path))  # type: ignore[attr-defined]
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", str(path)])
-            else:
+            elif os.name == "posix":
                 subprocess.Popen(["xdg-open", str(path)])
+            else:
+                subprocess.Popen(["open", str(path)])
         except Exception as exc:
             messagebox.showerror("오류", f"열기에 실패했습니다: {exc}")
 
@@ -616,7 +616,6 @@ class OrganizerGUI:
             return
 
         column = self.tree.identify_column(event.x)
-
         try:
             column_index = int(column.replace("#", "")) - 1
         except ValueError:
@@ -673,6 +672,7 @@ class OrganizerGUI:
             if not messagebox.askyesno("종료 확인", "작업이 실행 중입니다. 그래도 종료하시겠습니까?"):
                 return
 
+        self.append_log("[GUI] 애플리케이션 종료")
         self._save_settings()
         self.stop_watch()
         self.root.destroy()
@@ -680,11 +680,9 @@ class OrganizerGUI:
 
 def main() -> int:
     root = tk.Tk()
-
     style = ttk.Style()
     if "clam" in style.theme_names():
         style.theme_use("clam")
-
     OrganizerGUI(root)
     root.mainloop()
     return 0
