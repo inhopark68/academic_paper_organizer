@@ -1,0 +1,12 @@
+Metadata-Version: 2.4
+Name: myapi
+Version: 0.1.0
+Summary: FastAPI app with src layout
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: fastapi>=0.110.0
+Requires-Dist: uvicorn>=0.29.0
+
+# myapi
+
+FastAPI example project using src layout.

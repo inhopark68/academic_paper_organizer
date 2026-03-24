@@ -1,0 +1,17 @@
+README.md
+pyproject.toml
+src/academic_paper_organizer/__init__.py
+src/academic_paper_organizer/cli.py
+src/academic_paper_organizer/config.py
+src/academic_paper_organizer/core.py
+src/academic_paper_organizer/gui.py
+src/academic_paper_organizer/settings.py
+src/myapi/main.py
+src/myapi.egg-info/PKG-INFO
+src/myapi.egg-info/SOURCES.txt
+src/myapi.egg-info/dependency_links.txt
+src/myapi.egg-info/requires.txt
+src/myapi.egg-info/top_level.txt
+src/myapi/routers/users.py
+src/myapi/services/user_service.py
+test/test_users.py
