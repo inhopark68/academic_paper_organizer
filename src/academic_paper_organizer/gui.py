@@ -76,7 +76,7 @@ class OrganizerGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Academic Paper Organizer GUI")
-        self.root.geometry("1320x780")
+        self.root.geometry("1360x800")
 
         self.watch_var = tk.StringVar()
         self.output_var = tk.StringVar()
@@ -97,6 +97,7 @@ class OrganizerGUI:
         self.observer: Observer | None = None
         self.organizer: PaperOrganizer | None = None
         self.worker_thread: threading.Thread | None = None
+        self.cancel_event = threading.Event()
 
         self.snippets: dict[str, str] = {}
         self.sort_state: dict[str, bool] = {}
@@ -145,6 +146,9 @@ class OrganizerGUI:
         self.stop_watch_btn = ttk.Button(controls, text="감시 중지", command=self.stop_watch)
         self.stop_watch_btn.pack(side="left", padx=4)
 
+        self.cancel_btn = ttk.Button(controls, text="작업 취소", command=self.cancel_current_task)
+        self.cancel_btn.pack(side="left", padx=4)
+
         self.reindex_btn = ttk.Button(controls, text="재인덱싱", command=self.reindex)
         self.reindex_btn.pack(side="left", padx=4)
 
@@ -182,10 +186,7 @@ class OrganizerGUI:
         )
         self.select_subdirs_btn.grid(row=0, column=3, sticky="w", padx=(8, 8))
 
-        ttk.Label(
-            options_frame,
-            textvariable=self.selected_subdirs_label_var,
-        ).grid(row=0, column=4, sticky="ew")
+        ttk.Label(options_frame, textvariable=self.selected_subdirs_label_var).grid(row=0, column=4, sticky="ew")
 
         notebook = ttk.Notebook(outer)
         notebook.pack(fill="both", expand=True, pady=(10, 0))
@@ -238,12 +239,10 @@ class OrganizerGUI:
         action_row.pack(fill="x", pady=(8, 8))
         ttk.Button(action_row, text="검색", command=self.search).pack(side="left")
         ttk.Button(action_row, text="필터 초기화", command=self.clear_filters).pack(side="left", padx=6)
-
         ttk.Button(action_row, text="정리본 파일 열기", command=self.open_selected_file).pack(side="left", padx=(24, 6))
         ttk.Button(action_row, text="정리본 폴더 열기", command=self.open_selected_folder).pack(side="left", padx=6)
         ttk.Button(action_row, text="원본 파일 열기", command=self.open_selected_original_file).pack(side="left", padx=(24, 6))
         ttk.Button(action_row, text="원본 폴더 열기", command=self.open_selected_original_folder).pack(side="left", padx=6)
-
         ttk.Button(action_row, text="DOI 열기", command=self.open_selected_doi).pack(side="left", padx=6)
         ttk.Button(action_row, text="선택 파일 모으기", command=self.collect_selected_files).pack(side="left", padx=(24, 6))
         ttk.Button(action_row, text="선택 파일 ZIP", command=self.export_selected_zip).pack(side="left", padx=6)
@@ -320,7 +319,6 @@ class OrganizerGUI:
         if not output:
             self.gui_log_path = None
             return
-
         try:
             output_dir = Path(output).expanduser().resolve()
             log_dir = output_dir / "LOG"
@@ -393,17 +391,20 @@ class OrganizerGUI:
     def _update_button_states(self) -> None:
         watching = self.observer is not None and self.observer.is_alive()
         worker_running = self.worker_thread is not None and self.worker_thread.is_alive()
+        busy = watching or worker_running
 
-        self.start_watch_btn.configure(state="disabled" if watching or worker_running else "normal")
+        self.start_watch_btn.configure(state="disabled" if busy else "normal")
         self.stop_watch_btn.configure(state="normal" if watching else "disabled")
-        self.run_once_btn.configure(state="disabled" if worker_running or watching else "normal")
+        self.run_once_btn.configure(state="disabled" if busy else "normal")
         self.reindex_btn.configure(state="disabled" if worker_running else "normal")
+        self.cancel_btn.configure(state="normal" if busy else "disabled")
 
     def _run_in_thread(self, target: Callable[[], None], status_text: str) -> None:
         if self.worker_thread and self.worker_thread.is_alive():
             messagebox.showinfo("안내", "이미 작업이 실행 중입니다.")
             return
 
+        self.cancel_event.clear()
         self.status_var.set(status_text)
         self.worker_thread = threading.Thread(target=target, daemon=True)
         self.worker_thread.start()
@@ -416,6 +417,25 @@ class OrganizerGUI:
                 self._update_button_states()
 
         self.root.after(200, poll_worker)
+
+    def cancel_current_task(self) -> None:
+        self.cancel_event.set()
+
+        if self.organizer and hasattr(self.organizer, "request_cancel"):
+            try:
+                self.organizer.request_cancel()
+            except Exception:
+                pass
+
+        if self.observer:
+            try:
+                self.observer.stop()
+            except Exception:
+                pass
+
+        self.append_log("[GUI] 취소 요청됨")
+        self.set_status("취소 요청됨")
+        self._update_button_states()
 
     def _load_settings(self) -> None:
         try:
@@ -489,7 +509,6 @@ class OrganizerGUI:
     def _on_watch_option_changed(self) -> None:
         recursive = self.recursive_var.get()
         selected_mode = self.watch_mode_var.get() == "selected"
-
         state = "normal" if recursive and selected_mode else "disabled"
         if hasattr(self, "select_subdirs_btn"):
             self.select_subdirs_btn.configure(state=state)
@@ -571,12 +590,9 @@ class OrganizerGUI:
     def _get_effective_watch_roots(self, watch_dir: Path) -> list[Path]:
         if not self.recursive_var.get():
             return [watch_dir.resolve()]
-
         if self.watch_mode_var.get() == "all":
             return [watch_dir.resolve()]
-
-        selected = [p.resolve() for p in self.selected_subdirs if p.exists() and p.is_dir()]
-        return selected
+        return [p.resolve() for p in self.selected_subdirs if p.exists() and p.is_dir()]
 
     def run_once(self) -> None:
         paths = self._validate_paths()
@@ -590,7 +606,12 @@ class OrganizerGUI:
             return
 
         def task() -> None:
-            organizer = PaperOrganizer(watch_dir=watch_dir, output_dir=output_dir, log_fn=self.append_log)
+            organizer = PaperOrganizer(
+                watch_dir=watch_dir,
+                output_dir=output_dir,
+                log_fn=self.append_log,
+                cancel_event=self.cancel_event,
+            )
             try:
                 self.append_log(f"[GUI] 1회 처리 시작: {watch_dir}")
 
@@ -600,11 +621,18 @@ class OrganizerGUI:
                     scan_existing_pdfs(organizer, watch_dir, log_fn=self.append_log)
                 else:
                     for subdir in effective_roots:
+                        if self.cancel_event.is_set():
+                            self.append_log("[CANCEL] 선택 하위 폴더 처리 취소됨")
+                            break
                         self.append_log(f"[GUI] 선택 하위 폴더 처리: {subdir}")
                         scan_existing_pdfs(organizer, subdir, log_fn=self.append_log)
 
-                self.append_log("[GUI] 1회 처리 완료")
-                self.set_status("1회 처리 완료")
+                if self.cancel_event.is_set():
+                    self.append_log("[GUI] 1회 처리 취소")
+                    self.set_status("1회 처리 취소")
+                else:
+                    self.append_log("[GUI] 1회 처리 완료")
+                    self.set_status("1회 처리 완료")
             except Exception as exc:
                 self.append_log(f"[ERROR] 1회 처리 실패: {exc}")
                 self.set_status("1회 처리 실패")
@@ -630,7 +658,13 @@ class OrganizerGUI:
             return
 
         try:
-            self.organizer = PaperOrganizer(watch_dir=watch_dir, output_dir=output_dir, log_fn=self.append_log)
+            self.cancel_event.clear()
+            self.organizer = PaperOrganizer(
+                watch_dir=watch_dir,
+                output_dir=output_dir,
+                log_fn=self.append_log,
+                cancel_event=self.cancel_event,
+            )
 
             base_handler = PDFCreatedHandler(self.organizer)
             handler = FilteringEventHandler(base_handler, effective_roots)
@@ -659,6 +693,8 @@ class OrganizerGUI:
 
     def stop_watch(self) -> None:
         try:
+            self.cancel_event.set()
+
             if self.observer:
                 self.observer.stop()
                 self.observer.join(timeout=3)
@@ -694,9 +730,13 @@ class OrganizerGUI:
             self.append_log(f"[GUI] 재인덱싱 시작: {output_dir}")
 
             try:
-                run_reindex(args, log_fn=self.append_log)
-                self.append_log("[GUI] 재인덱싱 완료")
-                self.set_status("재인덱싱 완료")
+                run_reindex(args, log_fn=self.append_log, cancel_event=self.cancel_event)
+                if self.cancel_event.is_set():
+                    self.append_log("[GUI] 재인덱싱 취소")
+                    self.set_status("재인덱싱 취소")
+                else:
+                    self.append_log("[GUI] 재인덱싱 완료")
+                    self.set_status("재인덱싱 완료")
             except Exception as exc:
                 self.append_log(f"[ERROR] 재인덱싱 실패: {exc}")
                 self.set_status("재인덱싱 실패")
@@ -960,10 +1000,7 @@ class OrganizerGUI:
 
             self.append_log(f"[GUI] ZIP 생성 완료: {zip_file} | 성공 {added}건, 실패 {failed}건")
             self.set_status(f"ZIP 생성 완료: 성공 {added}건, 실패 {failed}건")
-            messagebox.showinfo(
-                "완료",
-                f"ZIP 생성 완료\n성공: {added}건\n실패: {failed}건\n\n구조: 분야/연도/파일명.pdf",
-            )
+            messagebox.showinfo("완료", f"ZIP 생성 완료\n성공: {added}건\n실패: {failed}건\n\n구조: 분야/연도/파일명.pdf")
         except Exception as exc:
             self.append_log(f"[ERROR] ZIP 생성 실패: {exc}")
             self.show_error("오류", f"ZIP 생성에 실패했습니다:\n{exc}")
@@ -985,25 +1022,14 @@ class OrganizerGUI:
 
         output_file = Path(csv_path).expanduser().resolve()
 
-        header = [
-            "field",
-            "year",
-            "author",
-            "venue",
-            "title",
-            "doi",
-            "stored_path",
-            "original_path",
-        ]
-
+        header = ["field", "year", "author", "venue", "title", "doi", "stored_path", "original_path"]
         rows: list[list[str]] = []
 
         for item_id in selected:
             values = self.tree.item(item_id, "values")
             if not values:
                 continue
-
-            row = [
+            rows.append([
                 str(values[0]) if len(values) > 0 else "",
                 str(values[1]) if len(values) > 1 else "",
                 str(values[2]) if len(values) > 2 else "",
@@ -1012,8 +1038,7 @@ class OrganizerGUI:
                 str(values[5]) if len(values) > 5 else "",
                 str(values[6]) if len(values) > 6 else "",
                 str(values[7]) if len(values) > 7 else "",
-            ]
-            rows.append(row)
+            ])
 
         try:
             with output_file.open("w", newline="", encoding="utf-8-sig") as f:

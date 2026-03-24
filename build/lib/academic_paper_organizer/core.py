@@ -4,6 +4,7 @@ import json
 import re
 import shutil
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -228,24 +229,17 @@ class PaperIndex:
 
 def extract_paper_metadata(pdf_path: Path) -> dict[str, str]:
     name = pdf_path.stem
-
     year_match = re.search(r"(19|20)\d{2}", name)
     year = year_match.group(0) if year_match else ""
-
-    author = ""
-    title = name
-    venue = ""
-    doi = ""
-    snippet = ""
 
     return {
         "field_code": "ETC",
         "year": year or "UnknownYear",
-        "first_author": author,
-        "venue": venue,
-        "title": title,
-        "doi": doi,
-        "snippet": snippet,
+        "first_author": "",
+        "venue": "",
+        "title": name,
+        "doi": "",
+        "snippet": "",
     }
 
 
@@ -256,10 +250,17 @@ def build_output_pdf_path(output_dir: Path, field_code: str, year: str, src_pdf:
 
 
 class PaperOrganizer:
-    def __init__(self, watch_dir: Path, output_dir: Path, log_fn: Callable[[str], None] | None = None):
+    def __init__(
+        self,
+        watch_dir: Path,
+        output_dir: Path,
+        log_fn: Callable[[str], None] | None = None,
+        cancel_event: threading.Event | None = None,
+    ):
         self.watch_dir = Path(watch_dir).resolve()
         self.output_dir = Path(output_dir).resolve()
         self.log_fn = log_fn or (lambda msg: None)
+        self.cancel_event = cancel_event or threading.Event()
 
         log_dir = self.output_dir / "LOG"
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -272,7 +273,17 @@ class PaperOrganizer:
     def log(self, message: str) -> None:
         self.log_fn(message)
 
+    def request_cancel(self) -> None:
+        self.cancel_event.set()
+
+    def is_cancelled(self) -> bool:
+        return self.cancel_event.is_set()
+
     def process_pdf(self, pdf_path: Path) -> None:
+        if self.is_cancelled():
+            self.log("[CANCEL] PDF 처리 취소됨")
+            return
+
         pdf_path = Path(pdf_path).resolve()
 
         if not pdf_path.exists() or not pdf_path.is_file():
@@ -290,7 +301,15 @@ class PaperOrganizer:
             pass
 
         try:
+            if self.is_cancelled():
+                self.log(f"[CANCEL] 메타 추출 전 취소: {pdf_path}")
+                return
+
             meta = extract_paper_metadata(pdf_path)
+
+            if self.is_cancelled():
+                self.log(f"[CANCEL] 메타 추출 후 취소: {pdf_path}")
+                return
 
             field_code = meta.get("field_code", "").strip() or "ETC"
             year = meta.get("year", "").strip() or "UnknownYear"
@@ -301,7 +320,16 @@ class PaperOrganizer:
             snippet = meta.get("snippet", "").strip()
 
             dst_pdf = build_output_pdf_path(self.output_dir, field_code, year, pdf_path)
+
+            if self.is_cancelled():
+                self.log(f"[CANCEL] 복사 전 취소: {pdf_path}")
+                return
+
             stored_pdf = copy_pdf_preserve_original(pdf_path, dst_pdf)
+
+            if self.is_cancelled():
+                self.log(f"[CANCEL] 복사 후 취소: {pdf_path}")
+                return
 
             self.index.delete_by_original_path(str(pdf_path))
             self.index.add_paper(
@@ -315,6 +343,10 @@ class PaperOrganizer:
                 original_path=str(pdf_path),
                 snippet=snippet,
             )
+
+            if self.is_cancelled():
+                self.log(f"[CANCEL] 인덱싱 후 취소: {pdf_path}")
+                return
 
             write_pdf_sidecar_metadata(
                 stored_pdf.with_suffix(".json"),
@@ -370,6 +402,10 @@ def scan_existing_pdfs(
 
     count = 0
     for pdf_path in root_dir.rglob("*.pdf"):
+        if organizer.is_cancelled():
+            logger("[CANCEL] 기존 PDF 스캔 취소됨")
+            break
+
         if not pdf_path.is_file():
             continue
 
@@ -382,7 +418,11 @@ def scan_existing_pdfs(
     logger(f"[SCAN] 기존 PDF 처리 완료: {count}건")
 
 
-def run_reindex(args, log_fn: Callable[[str], None] | None = None) -> None:
+def run_reindex(
+    args,
+    log_fn: Callable[[str], None] | None = None,
+    cancel_event: threading.Event | None = None,
+) -> None:
     logger = log_fn or (lambda msg: None)
     output_dir = Path(args.output).resolve()
     log_dir = output_dir / "LOG"
@@ -397,6 +437,10 @@ def run_reindex(args, log_fn: Callable[[str], None] | None = None) -> None:
         restored = 0
 
         for meta_file in output_dir.rglob("*.json"):
+            if cancel_event is not None and cancel_event.is_set():
+                logger("[CANCEL] 재인덱싱 취소됨")
+                break
+
             if meta_file.parent.name == "LOG":
                 continue
 
