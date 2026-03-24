@@ -4,6 +4,7 @@ src/academic_paper_organizer/__init__.py
 src/academic_paper_organizer/cli.py
 src/academic_paper_organizer/core.py
 src/academic_paper_organizer/gui.py
+src/academic_paper_organizer/settings.py
 src/academic_paper_organizer.egg-info/PKG-INFO
 src/academic_paper_organizer.egg-info/SOURCES.txt
 src/academic_paper_organizer.egg-info/dependency_links.txt

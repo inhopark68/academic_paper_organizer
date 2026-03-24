@@ -13,7 +13,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Callable
 
 import fitz  # PyMuPDF
 import requests
@@ -75,6 +75,8 @@ FIELD_RULES = {
     ],
 }
 
+LogFn = Callable[[str], None]
+
 
 @dataclass
 class PaperMetadata:
@@ -104,6 +106,14 @@ def safe_print(*args: Any) -> None:
         print(*args)
     except UnicodeEncodeError:
         print(*(str(a).encode("utf-8", errors="replace").decode("utf-8") for a in args))
+
+
+def _default_log(message: str) -> None:
+    safe_print(message)
+
+
+def _get_logger(log_fn: Optional[LogFn]) -> LogFn:
+    return log_fn if log_fn is not None else _default_log
 
 
 def sanitize_filename(text: str) -> str:
@@ -608,10 +618,56 @@ def make_snippet(text: str, keyword: str, width: int = 180) -> str:
     return snippet
 
 
+def build_metadata_for_pdf(file_path: Path, organizer: "PaperOrganizer") -> tuple[str, str, PaperMetadata]:
+    file_hash = compute_file_hash(file_path)
+    pdf_meta = extract_pdf_metadata(file_path)
+    text = extract_text_from_pdf(file_path, max_pages=5)
+    doi = extract_doi(text, pdf_meta)
+
+    crossref_data = fetch_crossref_metadata(doi) if doi else None
+    if crossref_data:
+        meta = parse_crossref(crossref_data)
+    else:
+        meta = PaperMetadata(
+            doi=doi,
+            title=organizer._guess_title(text, pdf_meta),
+            first_author=organizer._guess_author(pdf_meta),
+            year=guess_year_from_text(text),
+            venue=organizer._guess_venue(text, pdf_meta),
+        )
+
+    meta.field_code = classify_field(
+        text=text,
+        title=meta.title,
+        abstract=meta.abstract,
+        venue=meta.venue,
+    )
+    return file_hash, text, meta
+
+
+def index_pdf_record(
+    organizer: "PaperOrganizer",
+    file_path: Path,
+    file_hash: Optional[str],
+    meta: PaperMetadata,
+    text: str,
+) -> None:
+    organizer.paper_index.upsert(file_path, file_hash, meta, text)
+    if meta.doi:
+        organizer.doi_index.set(meta.doi, str(file_path))
+
+
 class PaperOrganizer:
-    def __init__(self, watch_dir: Path, output_dir: Path):
+    def __init__(
+        self,
+        watch_dir: Path,
+        output_dir: Path,
+        log_fn: Optional[LogFn] = None,
+    ):
         self.watch_dir = watch_dir
         self.output_dir = output_dir
+        self.log = _get_logger(log_fn)
+
         self.review_dir = output_dir / "REVIEW"
         self.duplicate_dir = output_dir / "DUPLICATE"
         self.log_dir = output_dir / "LOG"
@@ -642,38 +698,32 @@ class PaperOrganizer:
             if file_path.name.endswith(".crdownload") or file_path.name.endswith(".part"):
                 return
 
-            safe_print(f"[INFO] 처리 시작: {file_path}")
+            self.log(f"[INFO] 처리 시작: {file_path}")
 
             stable = wait_for_file_stable(file_path)
             if not stable:
                 meta.field_code = "ETC"
-                self._move_to_review(file_path, reason="file_not_stable")
+                moved_path = self._move_to_review(file_path, reason="file_not_stable")
+                index_pdf_record(self, moved_path, file_hash, meta, text)
+                self.logger.log(
+                    status="REVIEW",
+                    original_path=original_path,
+                    result_path=moved_path,
+                    meta=meta,
+                    message="File not stable",
+                    file_hash=file_hash,
+                )
+                self.log(f"[REVIEW] 파일 안정화 실패: {file_path}")
                 return
 
-            file_hash = compute_file_hash(file_path)
-            pdf_meta = extract_pdf_metadata(file_path)
-            text = extract_text_from_pdf(file_path, max_pages=5)
-            doi = extract_doi(text, pdf_meta)
-            meta.doi = doi
-
-            crossref_data = fetch_crossref_metadata(doi) if doi else None
-            if crossref_data:
-                meta = parse_crossref(crossref_data)
-            else:
-                meta.doi = doi
-                meta.title = self._guess_title(text, pdf_meta)
-                meta.first_author = self._guess_author(pdf_meta)
-                meta.year = guess_year_from_text(text)
-                meta.venue = self._guess_venue(text, pdf_meta)
-
-            meta.field_code = classify_field(text=text, title=meta.title, abstract=meta.abstract, venue=meta.venue)
+            file_hash, text, meta = build_metadata_for_pdf(file_path, self)
 
             if meta.doi:
                 existing = self.doi_index.get(meta.doi)
                 if existing:
                     duplicate_target = unique_path(self.duplicate_dir / file_path.name)
                     shutil.move(str(file_path), str(duplicate_target))
-                    self.paper_index.upsert(duplicate_target, file_hash, meta, text)
+                    index_pdf_record(self, duplicate_target, file_hash, meta, text)
                     self.logger.log(
                         status="DUPLICATE",
                         original_path=original_path,
@@ -682,12 +732,12 @@ class PaperOrganizer:
                         message=f"Duplicate DOI found. Existing file: {existing}",
                         file_hash=file_hash,
                     )
-                    safe_print(f"[DUPLICATE] {file_path} -> {duplicate_target}")
+                    self.log(f"[DUPLICATE] {file_path} -> {duplicate_target}")
                     return
 
             if not meta.title or not meta.year:
                 result_path = self._move_to_review(file_path, reason="metadata_incomplete")
-                self.paper_index.upsert(result_path, file_hash, meta, text)
+                index_pdf_record(self, result_path, file_hash, meta, text)
                 self.logger.log(
                     status="REVIEW",
                     original_path=original_path,
@@ -696,7 +746,7 @@ class PaperOrganizer:
                     message="Missing essential metadata",
                     file_hash=file_hash,
                 )
-                safe_print(f"[REVIEW] 필수 메타데이터 부족: {file_path}")
+                self.log(f"[REVIEW] 필수 메타데이터 부족: {file_path}")
                 return
 
             filename = build_filename(meta, original_suffix=".pdf")
@@ -705,10 +755,7 @@ class PaperOrganizer:
             result_path = unique_path(target_dir / filename)
             shutil.move(str(file_path), str(result_path))
 
-            if meta.doi:
-                self.doi_index.set(meta.doi, str(result_path))
-
-            self.paper_index.upsert(result_path, file_hash, meta, text)
+            index_pdf_record(self, result_path, file_hash, meta, text)
             self.logger.log(
                 status="SUCCESS",
                 original_path=original_path,
@@ -717,14 +764,14 @@ class PaperOrganizer:
                 message="Processed successfully",
                 file_hash=file_hash,
             )
-            safe_print(f"[OK] {original_path.name} -> {result_path}")
+            self.log(f"[OK] {original_path.name} -> {result_path}")
 
         except Exception as e:
-            safe_print(f"[ERROR] {file_path}: {e}")
+            self.log(f"[ERROR] {file_path}: {e}")
             try:
                 if file_path.exists():
                     result_path = self._move_to_review(file_path, reason="exception")
-                    self.paper_index.upsert(result_path, file_hash, meta, text)
+                    index_pdf_record(self, result_path, file_hash, meta, text)
             except Exception:
                 result_path = None
 
@@ -811,19 +858,26 @@ class PDFCreatedHandler(FileSystemEventHandler):
             self.organizer.process_pdf(path)
 
 
-def scan_existing_pdfs(organizer: PaperOrganizer, directory: Path) -> None:
+def scan_existing_pdfs(
+    organizer: PaperOrganizer,
+    directory: Path,
+    log_fn: Optional[LogFn] = None,
+) -> None:
+    log = _get_logger(log_fn)
     for file_path in sorted(directory.iterdir()):
         if file_path.is_file() and file_path.suffix.lower() == ".pdf":
+            log(f"[INFO] 스캔 중: {file_path}")
             organizer.process_pdf(file_path)
 
 
-def index_existing_library(output_dir: Path) -> int:
-    organizer = PaperOrganizer(output_dir, output_dir)
+def index_existing_library(output_dir: Path, log_fn: Optional[LogFn] = None) -> int:
+    log = _get_logger(log_fn)
+    organizer = PaperOrganizer(output_dir, output_dir, log_fn=log)
     indexed = 0
     try:
         removed = organizer.paper_index.remove_missing_paths()
         if removed:
-            safe_print(f"[INFO] 누락 파일 인덱스 정리: {removed}건")
+            log(f"[INFO] 누락 파일 인덱스 정리: {removed}건")
 
         for file_path in output_dir.rglob("*.pdf"):
             if any(part in {"LOG"} for part in file_path.parts):
@@ -836,17 +890,19 @@ def index_existing_library(output_dir: Path) -> int:
     return indexed
 
 
-def run_watch(args: argparse.Namespace) -> int:
+def run_watch(args: argparse.Namespace, log_fn: Optional[LogFn] = None) -> int:
+    log = _get_logger(log_fn)
+
     watch_dir = Path(args.watch).expanduser().resolve()
     output_dir = Path(args.output).expanduser().resolve()
 
-    organizer = PaperOrganizer(watch_dir=watch_dir, output_dir=output_dir)
+    organizer = PaperOrganizer(watch_dir=watch_dir, output_dir=output_dir, log_fn=log)
 
     try:
         if args.once:
-            safe_print("[INFO] 1회 스캔 시작")
-            scan_existing_pdfs(organizer, watch_dir)
-            safe_print("[INFO] 완료")
+            log("[INFO] 1회 스캔 시작")
+            scan_existing_pdfs(organizer, watch_dir, log_fn=log)
+            log("[INFO] 완료")
             return 0
 
         observer = Observer()
@@ -854,16 +910,16 @@ def run_watch(args: argparse.Namespace) -> int:
         observer.schedule(handler, str(watch_dir), recursive=False)
 
         def shutdown(signum=None, frame=None):
-            safe_print("\n[INFO] 종료 중...")
+            log("\n[INFO] 종료 중...")
             observer.stop()
 
         signal.signal(signal.SIGINT, shutdown)
         signal.signal(signal.SIGTERM, shutdown)
 
-        safe_print(f"[INFO] 감시 시작: {watch_dir}")
-        safe_print(f"[INFO] 출력 폴더: {output_dir}")
-        safe_print("[INFO] 기존 PDF 1회 스캔 중...")
-        scan_existing_pdfs(organizer, watch_dir)
+        log(f"[INFO] 감시 시작: {watch_dir}")
+        log(f"[INFO] 출력 폴더: {output_dir}")
+        log("[INFO] 기존 PDF 1회 스캔 중...")
+        scan_existing_pdfs(organizer, watch_dir, log_fn=log)
 
         observer.start()
         try:
@@ -877,11 +933,13 @@ def run_watch(args: argparse.Namespace) -> int:
         organizer.close()
 
 
-def run_search(args: argparse.Namespace) -> int:
+def run_search(args: argparse.Namespace, log_fn: Optional[LogFn] = None) -> int:
+    log = _get_logger(log_fn)
+
     output_dir = Path(args.output).expanduser().resolve()
     db_path = output_dir / "LOG" / "paper_index.sqlite3"
     if not db_path.exists():
-        safe_print("[INFO] 검색 인덱스가 없습니다. 먼저 논문을 처리하거나 reindex를 실행하세요.")
+        log("[INFO] 검색 인덱스가 없습니다. 먼저 논문을 처리하거나 reindex를 실행하세요.")
         return 1
 
     index = PaperIndex(db_path)
@@ -898,60 +956,45 @@ def run_search(args: argparse.Namespace) -> int:
         index.close()
 
     if not rows:
-        safe_print("검색 결과가 없습니다.")
+        log("검색 결과가 없습니다.")
         return 0
 
     for i, row in enumerate(rows, start=1):
-        safe_print(f"[{i}] {row.title or '(제목없음)'}")
-        safe_print(f"    field={row.field_code} | year={row.year} | author={row.first_author} | venue={row.venue}")
+        log(f"[{i}] {row.title or '(제목없음)'}")
+        log(f"    field={row.field_code} | year={row.year} | author={row.first_author} | venue={row.venue}")
         if row.doi:
-            safe_print(f"    doi={row.doi}")
+            log(f"    doi={row.doi}")
         if row.snippet:
-            safe_print(f"    snippet={row.snippet}")
-        safe_print(f"    path={row.path}")
-        safe_print("")
+            log(f"    snippet={row.snippet}")
+        log(f"    path={row.path}")
+        log("")
     return 0
 
 
-def run_reindex(args: argparse.Namespace) -> int:
+def run_reindex(args: argparse.Namespace, log_fn: Optional[LogFn] = None) -> int:
+    log = _get_logger(log_fn)
+
     output_dir = Path(args.output).expanduser().resolve()
-    organizer = PaperOrganizer(output_dir, output_dir)
+    organizer = PaperOrganizer(output_dir, output_dir, log_fn=log)
     indexed = 0
     try:
         removed = organizer.paper_index.remove_missing_paths()
         if removed:
-            safe_print(f"[INFO] 누락 파일 인덱스 정리: {removed}건")
+            log(f"[INFO] 누락 파일 인덱스 정리: {removed}건")
 
         for file_path in output_dir.rglob("*.pdf"):
             if any(part in {"LOG"} for part in file_path.parts):
                 continue
             try:
-                file_hash = compute_file_hash(file_path)
-                pdf_meta = extract_pdf_metadata(file_path)
-                text = extract_text_from_pdf(file_path, max_pages=5)
-                doi = extract_doi(text, pdf_meta)
-                crossref_data = fetch_crossref_metadata(doi) if doi else None
-                if crossref_data:
-                    meta = parse_crossref(crossref_data)
-                else:
-                    meta = PaperMetadata(
-                        doi=doi,
-                        title=organizer._guess_title(text, pdf_meta),
-                        first_author=organizer._guess_author(pdf_meta),
-                        year=guess_year_from_text(text),
-                        venue=organizer._guess_venue(text, pdf_meta),
-                    )
-                meta.field_code = classify_field(text=text, title=meta.title, abstract=meta.abstract, venue=meta.venue)
-                organizer.paper_index.upsert(file_path, file_hash, meta, text)
-                if meta.doi:
-                    organizer.doi_index.set(meta.doi, str(file_path))
+                file_hash, text, meta = build_metadata_for_pdf(file_path, organizer)
+                index_pdf_record(organizer, file_path, file_hash, meta, text)
                 indexed += 1
             except Exception as e:
-                safe_print(f"[WARN] 인덱싱 실패: {file_path} | {e}")
+                log(f"[WARN] 인덱싱 실패: {file_path} | {e}")
     finally:
         organizer.close()
 
-    safe_print(f"[INFO] 인덱싱 완료: {indexed}건")
+    log(f"[INFO] 인덱싱 완료: {indexed}건")
     return 0
 
 

@@ -16,24 +16,19 @@ class AppSettings:
     field: str = ""
     venue: str = ""
 
+    recursive: str = "True"
+    watch_mode: str = "all"
+    selected_subdirs: list[str] | None = None
+
     @classmethod
     def load(cls, path: Path) -> "AppSettings":
         if not path.exists():
             return cls()
-
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return cls()
-
-        defaults = cls()
-        values: dict[str, str] = {}
-        for field_name in cls.__dataclass_fields__:
-            values[field_name] = str(data.get(field_name, getattr(defaults, field_name)))
-        return cls(**values)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return cls(**data)
 
     def save(self, path: Path) -> None:
-        path.write_text(
-            json.dumps(asdict(self), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        payload = asdict(self)
+        if payload["selected_subdirs"] is None:
+            payload["selected_subdirs"] = []
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

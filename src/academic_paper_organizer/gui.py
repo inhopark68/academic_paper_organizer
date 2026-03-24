@@ -2,25 +2,71 @@ from __future__ import annotations
 
 import os
 import queue
+import shutil
 import subprocess
 import threading
 import time
 import webbrowser
+import zipfile
 from collections.abc import Callable
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-from academic_paper_organizer.core import (
-    PDFCreatedHandler,
-    PaperIndex,
-    PaperOrganizer,
-    run_reindex,
-    scan_existing_pdfs,
-)
-from academic_paper_organizer.settings import AppSettings
+from .core import PDFCreatedHandler, PaperIndex, PaperOrganizer, run_reindex, scan_existing_pdfs
+from .settings import AppSettings
+
+
+class FilteringEventHandler(FileSystemEventHandler):
+    def __init__(
+        self,
+        delegate: FileSystemEventHandler,
+        allowed_roots: list[Path],
+    ):
+        super().__init__()
+        self.delegate = delegate
+        self.allowed_roots = [p.resolve() for p in allowed_roots]
+
+    def _is_allowed(self, src_path: str) -> bool:
+        try:
+            target = Path(src_path).resolve()
+        except Exception:
+            return False
+
+        for root in self.allowed_roots:
+            try:
+                target.relative_to(root)
+                return True
+            except ValueError:
+                continue
+        return False
+
+    def on_created(self, event):
+        if event.is_directory:
+            return
+        if self._is_allowed(event.src_path):
+            handler = getattr(self.delegate, "on_created", None)
+            if handler:
+                handler(event)
+
+    def on_moved(self, event):
+        if event.is_directory:
+            return
+        if self._is_allowed(event.dest_path):
+            handler = getattr(self.delegate, "on_moved", None)
+            if handler:
+                handler(event)
+
+    def on_modified(self, event):
+        if event.is_directory:
+            return
+        if self._is_allowed(event.src_path):
+            handler = getattr(self.delegate, "on_modified", None)
+            if handler:
+                handler(event)
 
 
 class OrganizerGUI:
@@ -41,6 +87,11 @@ class OrganizerGUI:
         self.limit_var = tk.StringVar(value="50")
         self.status_var = tk.StringVar(value="대기 중")
 
+        self.recursive_var = tk.BooleanVar(value=True)
+        self.watch_mode_var = tk.StringVar(value="all")  # all | selected
+        self.selected_subdirs: list[Path] = []
+        self.selected_subdirs_label_var = tk.StringVar(value="선택된 하위 폴더 없음")
+
         self.log_queue: queue.Queue[str] = queue.Queue()
         self.observer: Observer | None = None
         self.organizer: PaperOrganizer | None = None
@@ -57,6 +108,8 @@ class OrganizerGUI:
         self._load_settings()
         self._update_gui_log_path()
         self._update_button_states()
+        self._format_selected_subdirs_label()
+        self._on_watch_option_changed()
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.after(150, self._drain_log_queue)
@@ -93,6 +146,45 @@ class OrganizerGUI:
 
         self.reindex_btn = ttk.Button(controls, text="재인덱싱", command=self.reindex)
         self.reindex_btn.pack(side="left", padx=4)
+
+        options_frame = ttk.Frame(top)
+        options_frame.grid(row=2, column=0, columnspan=5, sticky="ew", pady=(8, 0))
+        options_frame.columnconfigure(4, weight=1)
+
+        ttk.Checkbutton(
+            options_frame,
+            text="하위 폴더까지 포함",
+            variable=self.recursive_var,
+            command=self._on_watch_option_changed,
+        ).grid(row=0, column=0, sticky="w", padx=(0, 12))
+
+        ttk.Radiobutton(
+            options_frame,
+            text="전체 감시",
+            variable=self.watch_mode_var,
+            value="all",
+            command=self._on_watch_option_changed,
+        ).grid(row=0, column=1, sticky="w", padx=(0, 8))
+
+        ttk.Radiobutton(
+            options_frame,
+            text="선택한 하위 폴더만 감시",
+            variable=self.watch_mode_var,
+            value="selected",
+            command=self._on_watch_option_changed,
+        ).grid(row=0, column=2, sticky="w", padx=(0, 8))
+
+        self.select_subdirs_btn = ttk.Button(
+            options_frame,
+            text="하위 폴더 선택",
+            command=self.pick_subdirs,
+        )
+        self.select_subdirs_btn.grid(row=0, column=3, sticky="w", padx=(8, 8))
+
+        ttk.Label(
+            options_frame,
+            textvariable=self.selected_subdirs_label_var,
+        ).grid(row=0, column=4, sticky="ew")
 
         notebook = ttk.Notebook(outer)
         notebook.pack(fill="both", expand=True, pady=(10, 0))
@@ -148,11 +240,19 @@ class OrganizerGUI:
         ttk.Button(action_row, text="파일 열기", command=self.open_selected_file).pack(side="left", padx=(24, 6))
         ttk.Button(action_row, text="폴더 열기", command=self.open_selected_folder).pack(side="left", padx=6)
         ttk.Button(action_row, text="DOI 열기", command=self.open_selected_doi).pack(side="left", padx=6)
+        ttk.Button(action_row, text="선택 파일 모으기", command=self.collect_selected_files).pack(side="left", padx=(24, 6))
+        ttk.Button(action_row, text="선택 파일 ZIP", command=self.export_selected_zip).pack(side="left", padx=6)
 
         tree_frame = ttk.Frame(parent)
         tree_frame.pack(fill="both", expand=True)
 
-        self.tree = ttk.Treeview(tree_frame, columns=self.COLUMNS, show="headings", height=18)
+        self.tree = ttk.Treeview(
+            tree_frame,
+            columns=self.COLUMNS,
+            show="headings",
+            height=18,
+            selectmode="extended",
+        )
 
         self.base_headings = {
             "field": "분야",
@@ -224,30 +324,12 @@ class OrganizerGUI:
     def _write_log_file(self, message: str) -> None:
         if self.gui_log_path is None:
             return
-
         try:
             timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
             with self.gui_log_path.open("a", encoding="utf-8") as f:
                 f.write(f"{timestamp} {message}\n")
         except Exception:
             pass
-
-    def set_status(self, text: str) -> None:
-        self.root.after(0, lambda: self.status_var.set(text))
-
-    def show_error(self, title: str, message: str) -> None:
-        self.root.after(0, lambda: messagebox.showerror(title, message))
-
-    def pick_watch_dir(self) -> None:
-        path = filedialog.askdirectory(title="감시 폴더 선택")
-        if path:
-            self.watch_var.set(path)
-
-    def pick_output_dir(self) -> None:
-        path = filedialog.askdirectory(title="출력 폴더 선택")
-        if path:
-            self.output_var.set(path)
-            self._update_gui_log_path()
 
     def append_log(self, message: str) -> None:
         self._update_gui_log_path()
@@ -262,6 +344,25 @@ class OrganizerGUI:
                 break
             self._append_text_widget(self.log_text, message + "\n")
         self.root.after(150, self._drain_log_queue)
+
+    def set_status(self, text: str) -> None:
+        self.root.after(0, lambda: self.status_var.set(text))
+
+    def show_error(self, title: str, message: str) -> None:
+        self.root.after(0, lambda: messagebox.showerror(title, message))
+
+    def pick_watch_dir(self) -> None:
+        path = filedialog.askdirectory(title="감시 폴더 선택")
+        if path:
+            self.watch_var.set(path)
+            self.selected_subdirs = []
+            self._format_selected_subdirs_label()
+
+    def pick_output_dir(self) -> None:
+        path = filedialog.askdirectory(title="출력 폴더 선택")
+        if path:
+            self.output_var.set(path)
+            self._update_gui_log_path()
 
     def _validate_paths(self) -> tuple[Path, Path] | None:
         watch = self.watch_var.get().strip()
@@ -319,6 +420,14 @@ class OrganizerGUI:
             self.year_var.set(settings.year)
             self.field_var.set(settings.field)
             self.venue_var.set(settings.venue)
+
+            recursive = getattr(settings, "recursive", "True")
+            watch_mode = getattr(settings, "watch_mode", "all")
+            selected_subdirs = getattr(settings, "selected_subdirs", [])
+
+            self.recursive_var.set(str(recursive).lower() == "true")
+            self.watch_mode_var.set(watch_mode if watch_mode in ("all", "selected") else "all")
+            self.selected_subdirs = [Path(p) for p in selected_subdirs if p]
         except Exception as exc:
             self.append_log(f"[WARN] 설정 불러오기 실패: {exc}")
 
@@ -332,28 +441,160 @@ class OrganizerGUI:
             year=self.year_var.get().strip(),
             field=self.field_var.get().strip(),
             venue=self.venue_var.get().strip(),
+            recursive=str(self.recursive_var.get()),
+            watch_mode=self.watch_mode_var.get().strip(),
+            selected_subdirs=[str(p) for p in self.selected_subdirs],
         )
         try:
             settings.save(self.config_path)
         except Exception as exc:
             self.append_log(f"[WARN] 설정 저장 실패: {exc}")
 
+    def _list_all_subdirs(self, root: Path) -> list[Path]:
+        results: list[Path] = []
+        try:
+            for p in sorted(root.rglob("*")):
+                if p.is_dir():
+                    results.append(p.resolve())
+        except Exception as exc:
+            self.append_log(f"[WARN] 하위 폴더 조회 실패: {exc}")
+        return results
+
+    def _format_selected_subdirs_label(self) -> None:
+        if not self.selected_subdirs:
+            self.selected_subdirs_label_var.set("선택된 하위 폴더 없음")
+            return
+
+        names = []
+        for p in self.selected_subdirs[:3]:
+            try:
+                root = Path(self.watch_var.get().strip()).expanduser().resolve()
+                names.append(str(p.resolve().relative_to(root)))
+            except Exception:
+                names.append(p.name)
+
+        suffix = ""
+        if len(self.selected_subdirs) > 3:
+            suffix = f" 외 {len(self.selected_subdirs) - 3}개"
+        self.selected_subdirs_label_var.set(", ".join(names) + suffix)
+
+    def _on_watch_option_changed(self) -> None:
+        recursive = self.recursive_var.get()
+        selected_mode = self.watch_mode_var.get() == "selected"
+
+        state = "normal" if recursive and selected_mode else "disabled"
+        if hasattr(self, "select_subdirs_btn"):
+            self.select_subdirs_btn.configure(state=state)
+
+    def pick_subdirs(self) -> None:
+        watch = self.watch_var.get().strip()
+        if not watch:
+            messagebox.showinfo("안내", "먼저 감시 폴더를 선택해 주세요.")
+            return
+
+        root = Path(watch).expanduser().resolve()
+        if not root.exists() or not root.is_dir():
+            messagebox.showwarning("경고", "감시 폴더가 올바르지 않습니다.")
+            return
+
+        subdirs = self._list_all_subdirs(root)
+        if not subdirs:
+            messagebox.showinfo("안내", "선택 가능한 하위 폴더가 없습니다.")
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("감시할 하위 폴더 선택")
+        dialog.geometry("560x480")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        ttk.Label(
+            dialog,
+            text="감시할 하위 폴더를 선택하세요. 선택한 폴더의 하위 폴더도 함께 감시됩니다.",
+        ).pack(anchor="w", padx=10, pady=(10, 6))
+
+        frame = ttk.Frame(dialog)
+        frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+        listbox = tk.Listbox(frame, selectmode=tk.MULTIPLE)
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=listbox.yview)
+        listbox.configure(yscrollcommand=scrollbar.set)
+
+        listbox.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        rel_paths: list[str] = []
+        for subdir in subdirs:
+            rel = str(subdir.relative_to(root))
+            rel_paths.append(rel)
+            listbox.insert("end", rel)
+
+        selected_rel = set()
+        for p in self.selected_subdirs:
+            try:
+                selected_rel.add(str(p.resolve().relative_to(root)))
+            except Exception:
+                pass
+
+        for idx, rel in enumerate(rel_paths):
+            if rel in selected_rel:
+                listbox.selection_set(idx)
+
+        btns = ttk.Frame(dialog)
+        btns.pack(fill="x", padx=10, pady=(0, 10))
+
+        def select_all() -> None:
+            listbox.selection_set(0, "end")
+
+        def clear_all() -> None:
+            listbox.selection_clear(0, "end")
+
+        def confirm() -> None:
+            indices = listbox.curselection()
+            self.selected_subdirs = [(root / rel_paths[i]).resolve() for i in indices]
+            self._format_selected_subdirs_label()
+            dialog.destroy()
+
+        ttk.Button(btns, text="전체 선택", command=select_all).pack(side="left")
+        ttk.Button(btns, text="선택 해제", command=clear_all).pack(side="left", padx=6)
+        ttk.Button(btns, text="확인", command=confirm).pack(side="right")
+        ttk.Button(btns, text="취소", command=dialog.destroy).pack(side="right", padx=6)
+
+    def _get_effective_watch_roots(self, watch_dir: Path) -> list[Path]:
+        if not self.recursive_var.get():
+            return [watch_dir.resolve()]
+
+        if self.watch_mode_var.get() == "all":
+            return [watch_dir.resolve()]
+
+        selected = [p.resolve() for p in self.selected_subdirs if p.exists() and p.is_dir()]
+        return selected
+
     def run_once(self) -> None:
         paths = self._validate_paths()
         if not paths:
             return
-
         watch_dir, output_dir = paths
 
+        effective_roots = self._get_effective_watch_roots(watch_dir)
+        if self.recursive_var.get() and self.watch_mode_var.get() == "selected" and not effective_roots:
+            messagebox.showinfo("안내", "처리할 하위 폴더를 먼저 선택해 주세요.")
+            return
+
         def task() -> None:
-            organizer = PaperOrganizer(
-                watch_dir=watch_dir,
-                output_dir=output_dir,
-                log_fn=self.append_log,
-            )
+            organizer = PaperOrganizer(watch_dir=watch_dir, output_dir=output_dir, log_fn=self.append_log)
             try:
                 self.append_log(f"[GUI] 1회 처리 시작: {watch_dir}")
-                scan_existing_pdfs(organizer, watch_dir, log_fn=self.append_log)
+
+                if not self.recursive_var.get():
+                    scan_existing_pdfs(organizer, watch_dir, log_fn=self.append_log)
+                elif self.watch_mode_var.get() == "all":
+                    scan_existing_pdfs(organizer, watch_dir, log_fn=self.append_log)
+                else:
+                    for subdir in effective_roots:
+                        self.append_log(f"[GUI] 선택 하위 폴더 처리: {subdir}")
+                        scan_existing_pdfs(organizer, subdir, log_fn=self.append_log)
+
                 self.append_log("[GUI] 1회 처리 완료")
                 self.set_status("1회 처리 완료")
             except Exception as exc:
@@ -373,22 +614,31 @@ class OrganizerGUI:
         paths = self._validate_paths()
         if not paths:
             return
-
         watch_dir, output_dir = paths
 
+        effective_roots = self._get_effective_watch_roots(watch_dir)
+        if self.recursive_var.get() and self.watch_mode_var.get() == "selected" and not effective_roots:
+            messagebox.showinfo("안내", "감시할 하위 폴더를 먼저 선택해 주세요.")
+            return
+
         try:
-            self.organizer = PaperOrganizer(
-                watch_dir=watch_dir,
-                output_dir=output_dir,
-                log_fn=self.append_log,
-            )
-            handler = PDFCreatedHandler(self.organizer)
+            self.organizer = PaperOrganizer(watch_dir=watch_dir, output_dir=output_dir, log_fn=self.append_log)
+
+            base_handler = PDFCreatedHandler(self.organizer)
+            handler = FilteringEventHandler(base_handler, effective_roots)
+
             self.observer = Observer()
-            self.observer.schedule(handler, str(watch_dir), recursive=False)
+            self.observer.schedule(handler, str(watch_dir), recursive=self.recursive_var.get())
             self.observer.start()
 
-            self.status_var.set(f"감시 중: {watch_dir}")
-            self.append_log(f"[GUI] 감시 시작: {watch_dir}")
+            mode_text = "루트만"
+            if self.recursive_var.get() and self.watch_mode_var.get() == "all":
+                mode_text = "전체 하위 폴더 포함"
+            elif self.recursive_var.get() and self.watch_mode_var.get() == "selected":
+                mode_text = f"선택 하위 폴더 {len(effective_roots)}개"
+
+            self.status_var.set(f"감시 중: {watch_dir} ({mode_text})")
+            self.append_log(f"[GUI] 감시 시작: {watch_dir} | 모드={mode_text}")
         except Exception as exc:
             if self.organizer:
                 self.organizer.close()
@@ -446,6 +696,14 @@ class OrganizerGUI:
 
         self._run_in_thread(task, "재인덱싱 중")
 
+    def _clear_results(self) -> None:
+        self.snippets.clear()
+        self.sort_state.clear()
+        self.current_sort_column = None
+        self._refresh_heading_arrows()
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
     def clear_filters(self) -> None:
         self.keyword_var.set("")
         self.author_var.set("")
@@ -453,15 +711,7 @@ class OrganizerGUI:
         self.field_var.set("")
         self.venue_var.set("")
         self.limit_var.set("50")
-
-        self.snippets.clear()
-        self.sort_state.clear()
-        self.current_sort_column = None
-        self._refresh_heading_arrows()
-
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-
+        self._clear_results()
         self._set_text_widget(self.snippet_text, "")
         self.status_var.set("필터 초기화 완료")
 
@@ -498,27 +748,13 @@ class OrganizerGUI:
         finally:
             index.close()
 
-        self.snippets.clear()
-        self.sort_state.clear()
-        self.current_sort_column = None
-        self._refresh_heading_arrows()
-
-        for item in self.tree.get_children():
-            self.tree.delete(item)
+        self._clear_results()
 
         for row in rows:
             item_id = self.tree.insert(
                 "",
                 "end",
-                values=(
-                    row.field_code,
-                    row.year,
-                    row.first_author,
-                    row.venue,
-                    row.title,
-                    row.doi,
-                    row.path,
-                ),
+                values=(row.field_code, row.year, row.first_author, row.venue, row.title, row.doi, row.path),
             )
             self.snippets[item_id] = row.snippet or ""
 
@@ -536,29 +772,175 @@ class OrganizerGUI:
     def _on_tree_select(self, event) -> None:
         selected = self.tree.selection()
         if not selected:
+            self._set_text_widget(self.snippet_text, "")
             return
         item = selected[0]
         snippet = self.snippets.get(item, "")
         self._set_text_widget(self.snippet_text, snippet)
 
-    def _selected_path(self) -> Path | None:
+    def _selected_values(self):
         selected = self.tree.selection()
         if not selected:
             return None
         values = self.tree.item(selected[0], "values")
+        return values or None
+
+    def _selected_path(self) -> Path | None:
+        values = self._selected_values()
         if not values:
             return None
         return Path(values[6])
 
     def _selected_doi(self) -> str | None:
-        selected = self.tree.selection()
-        if not selected:
-            return None
-        values = self.tree.item(selected[0], "values")
+        values = self._selected_values()
         if not values:
             return None
         doi = str(values[5]).strip()
         return doi or None
+
+    def _selected_paths(self) -> list[Path]:
+        selected = self.tree.selection()
+        results: list[Path] = []
+
+        for item_id in selected:
+            values = self.tree.item(item_id, "values")
+            if not values:
+                continue
+            try:
+                path = Path(values[6])
+            except Exception:
+                continue
+            if path.exists() and path.is_file():
+                results.append(path)
+
+        return results
+
+    def _unique_destination(self, path: Path) -> Path:
+        if not path.exists():
+            return path
+
+        stem = path.stem
+        suffix = path.suffix
+        parent = path.parent
+
+        index = 2
+        while True:
+            candidate = parent / f"{stem}_v{index}{suffix}"
+            if not candidate.exists():
+                return candidate
+            index += 1
+
+    def _unique_arcname(self, base_arcname: str, used_names: set[str]) -> str:
+        if base_arcname not in used_names:
+            return base_arcname
+
+        path = Path(base_arcname)
+        parent = path.parent
+        stem = path.stem
+        suffix = path.suffix
+
+        index = 2
+        while True:
+            candidate_name = f"{stem}_v{index}{suffix}"
+            candidate = str(parent / candidate_name).replace("\\", "/")
+            if candidate not in used_names:
+                return candidate
+            index += 1
+
+    def _zip_arcname_for_item(self, item_id: str) -> tuple[Path | None, str | None]:
+        values = self.tree.item(item_id, "values")
+        if not values:
+            return None, None
+
+        try:
+            src = Path(values[6])
+        except Exception:
+            return None, None
+
+        if not src.exists() or not src.is_file():
+            return None, None
+
+        field_code = str(values[0]).strip() or "ETC"
+        year = str(values[1]).strip() or "UnknownYear"
+        arcname = str(Path(field_code) / year / src.name).replace("\\", "/")
+        return src, arcname
+
+    def collect_selected_files(self) -> None:
+        paths = self._selected_paths()
+        if not paths:
+            messagebox.showinfo("안내", "먼저 검색 결과에서 하나 이상의 파일을 선택해 주세요.")
+            return
+
+        target_dir = filedialog.askdirectory(title="파일을 모을 대상 폴더 선택")
+        if not target_dir:
+            return
+
+        target_path = Path(target_dir).expanduser().resolve()
+        target_path.mkdir(parents=True, exist_ok=True)
+
+        copied = 0
+        failed = 0
+
+        for src in paths:
+            try:
+                dst = self._unique_destination(target_path / src.name)
+                shutil.copy2(src, dst)
+                copied += 1
+            except Exception as exc:
+                failed += 1
+                self.append_log(f"[WARN] 파일 복사 실패: {src} | {exc}")
+
+        self.append_log(f"[GUI] 선택 파일 모으기 완료: 성공 {copied}건, 실패 {failed}건")
+        self.set_status(f"선택 파일 모으기 완료: 성공 {copied}건, 실패 {failed}건")
+        messagebox.showinfo("완료", f"파일 복사 완료\n성공: {copied}건\n실패: {failed}건")
+
+    def export_selected_zip(self) -> None:
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showinfo("안내", "먼저 검색 결과에서 하나 이상의 파일을 선택해 주세요.")
+            return
+
+        zip_path = filedialog.asksaveasfilename(
+            title="ZIP 파일 저장",
+            defaultextension=".zip",
+            filetypes=[("ZIP files", "*.zip")],
+            initialfile="selected_papers.zip",
+        )
+        if not zip_path:
+            return
+
+        zip_file = Path(zip_path).expanduser().resolve()
+
+        added = 0
+        failed = 0
+        used_names: set[str] = set()
+
+        try:
+            with zipfile.ZipFile(zip_file, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for item_id in selected:
+                    src, base_arcname = self._zip_arcname_for_item(item_id)
+                    if src is None or base_arcname is None:
+                        failed += 1
+                        continue
+
+                    try:
+                        arcname = self._unique_arcname(base_arcname, used_names)
+                        zf.write(src, arcname=arcname)
+                        used_names.add(arcname)
+                        added += 1
+                    except Exception as exc:
+                        failed += 1
+                        self.append_log(f"[WARN] ZIP 추가 실패: {src} | {exc}")
+
+            self.append_log(f"[GUI] ZIP 생성 완료: {zip_file} | 성공 {added}건, 실패 {failed}건")
+            self.set_status(f"ZIP 생성 완료: 성공 {added}건, 실패 {failed}건")
+            messagebox.showinfo(
+                "완료",
+                f"ZIP 생성 완료\n성공: {added}건\n실패: {failed}건\n\n구조: 분야/연도/파일명.pdf",
+            )
+        except Exception as exc:
+            self.append_log(f"[ERROR] ZIP 생성 실패: {exc}")
+            self.show_error("오류", f"ZIP 생성에 실패했습니다:\n{exc}")
 
     def _normalize_doi_url(self, doi: str) -> str:
         doi = doi.strip()
