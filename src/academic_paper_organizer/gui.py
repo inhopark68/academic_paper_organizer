@@ -247,6 +247,7 @@ class OrganizerGUI:
         ttk.Button(action_row, text="선택 파일 모으기", command=self.collect_selected_files).pack(side="left", padx=(24, 6))
         ttk.Button(action_row, text="선택 파일 ZIP", command=self.export_selected_zip).pack(side="left", padx=6)
         ttk.Button(action_row, text="선택 목록 CSV 저장", command=self.export_selected_csv).pack(side="left", padx=6)
+        ttk.Button(action_row, text="검색 결과 전체 CSV 저장", command=self.export_all_results_csv).pack(side="left", padx=6)
 
         tree_frame = ttk.Frame(parent)
         tree_frame.pack(fill="both", expand=True)
@@ -1005,30 +1006,40 @@ class OrganizerGUI:
             self.append_log(f"[ERROR] ZIP 생성 실패: {exc}")
             self.show_error("오류", f"ZIP 생성에 실패했습니다:\n{exc}")
 
-    def export_selected_csv(self) -> None:
-        selected = self.tree.selection()
-        if not selected:
-            messagebox.showinfo("안내", "먼저 검색 결과에서 하나 이상의 항목을 선택해 주세요.")
+    def _export_tree_items_to_csv(self, item_ids: list[str], default_filename: str) -> None:
+        if not item_ids:
+            messagebox.showinfo("안내", "저장할 항목이 없습니다.")
             return
 
         csv_path = filedialog.asksaveasfilename(
             title="CSV 파일 저장",
             defaultextension=".csv",
             filetypes=[("CSV files", "*.csv")],
-            initialfile="selected_papers.csv",
+            initialfile=default_filename,
         )
         if not csv_path:
             return
 
         output_file = Path(csv_path).expanduser().resolve()
 
-        header = ["field", "year", "author", "venue", "title", "doi", "stored_path", "original_path"]
+        header = [
+            "field",
+            "year",
+            "author",
+            "venue",
+            "title",
+            "doi",
+            "stored_path",
+            "original_path",
+        ]
+
         rows: list[list[str]] = []
 
-        for item_id in selected:
+        for item_id in item_ids:
             values = self.tree.item(item_id, "values")
             if not values:
                 continue
+
             rows.append([
                 str(values[0]) if len(values) > 0 else "",
                 str(values[1]) if len(values) > 1 else "",
@@ -1046,12 +1057,28 @@ class OrganizerGUI:
                 writer.writerow(header)
                 writer.writerows(rows)
 
-            self.append_log(f"[GUI] 선택 목록 CSV 저장 완료: {output_file} | {len(rows)}건")
-            self.set_status(f"선택 목록 CSV 저장 완료: {len(rows)}건")
+            self.append_log(f"[GUI] CSV 저장 완료: {output_file} | {len(rows)}건")
+            self.set_status(f"CSV 저장 완료: {len(rows)}건")
             messagebox.showinfo("완료", f"CSV 저장 완료\n파일: {output_file}\n건수: {len(rows)}")
         except Exception as exc:
             self.append_log(f"[ERROR] CSV 저장 실패: {exc}")
             self.show_error("오류", f"CSV 저장에 실패했습니다:\n{exc}")
+
+    def export_selected_csv(self) -> None:
+        selected = list(self.tree.selection())
+        if not selected:
+            messagebox.showinfo("안내", "먼저 검색 결과에서 하나 이상의 항목을 선택해 주세요.")
+            return
+
+        self._export_tree_items_to_csv(selected, "selected_papers.csv")
+
+    def export_all_results_csv(self) -> None:
+        item_ids = list(self.tree.get_children())
+        if not item_ids:
+            messagebox.showinfo("안내", "현재 검색 결과가 없습니다.")
+            return
+
+        self._export_tree_items_to_csv(item_ids, "search_results.csv")
 
     def _normalize_doi_url(self, doi: str) -> str:
         doi = doi.strip()
