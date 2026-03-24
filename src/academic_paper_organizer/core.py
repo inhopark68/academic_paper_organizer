@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
+from pypdf import PdfReader
 from watchdog.events import FileSystemEventHandler
 
 
@@ -66,13 +67,13 @@ def normalize_year(
     allow_historic: bool = False,
 ) -> str:
     """
-    연도 문자열/숫자를 안전하게 정규화한다.
+    연도를 안전하게 정규화한다.
 
     기본 정책:
     - 숫자 4자리만 인정
-    - 현대 논문 기본 범위: 1950 ~ 현재연도+1
+    - 일반 논문 기준 1950 ~ 현재연도+1
     - allow_historic=True면 1800년 이후 허용
-    - 나머지는 UnknownYear
+    - 1917 같은 오인식은 2017로 자동 보정
     """
     if year_value is None:
         return "UnknownYear"
@@ -94,13 +95,19 @@ def normalize_year(
     if min_year <= year <= max_year:
         return str(year)
 
+    # OCR / 추출 오인식 보정: 1917 -> 2017
+    if not allow_historic and 1900 <= year <= 1930:
+        corrected = year + 100
+        if 1950 <= corrected <= max_year:
+            return str(corrected)
+
     return "UnknownYear"
 
 
 def extract_year_candidates(text: str) -> list[str]:
     if not text:
         return []
-    return re.findall(r"\b(18\d{2}|19\d{2}|20\d{2})\b", text)
+    return re.findall(r"(18\d{2}|19\d{2}|20\d{2})", text)
 
 
 def choose_best_year(
@@ -177,6 +184,47 @@ def write_pdf_sidecar_metadata(
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def extract_pdf_first_page_text(pdf_path: Path) -> str:
+    """
+    PDF 첫 페이지 텍스트를 추출한다.
+    실패하면 빈 문자열 반환.
+    """
+    try:
+        reader = PdfReader(str(pdf_path))
+        if not reader.pages:
+            return ""
+        text = reader.pages[0].extract_text() or ""
+        return text.strip()
+    except Exception:
+        return ""
+
+
+def extract_pdf_document_info(pdf_path: Path) -> dict[str, str]:
+    """
+    PDF 메타데이터(Title/Author/Subject 등)를 읽는다.
+    실패하면 빈 dict 반환.
+    """
+    try:
+        reader = PdfReader(str(pdf_path))
+        meta = reader.metadata or {}
+
+        def _clean(value) -> str:
+            if value is None:
+                return ""
+            return str(value).strip()
+
+        return {
+            "title": _clean(meta.get("/Title")),
+            "author": _clean(meta.get("/Author")),
+            "subject": _clean(meta.get("/Subject")),
+            "keywords": _clean(meta.get("/Keywords")),
+            "creator": _clean(meta.get("/Creator")),
+            "producer": _clean(meta.get("/Producer")),
+        }
+    except Exception:
+        return {}
 
 
 class PaperIndex:
@@ -386,27 +434,141 @@ def infer_field_code_from_text(text: str) -> str:
     return "ETC"
 
 
+def infer_first_author(text: str) -> str:
+    """
+    매우 단순한 휴리스틱.
+    첫 페이지 상단부에서 저자 후보를 한 줄 찾는다.
+    """
+    if not text:
+        return ""
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+
+    # 제목 다음 1~4줄 안에서 이메일/소속 전 줄을 저자 후보로 간주
+    upper_lines = lines[:8]
+    for line in upper_lines[1:5]:
+        lowered = line.lower()
+        if "@" in lowered:
+            continue
+        if any(token in lowered for token in ["university", "department", "school", "institute", "lab", "college"]):
+            continue
+        if len(line) > 120:
+            continue
+        if re.search(r"[A-Za-z]", line):
+            return line
+
+    return ""
+
+
+def infer_title(file_stem: str, first_page_text: str, pdf_info: dict[str, str]) -> str:
+    meta_title = pdf_info.get("title", "").strip()
+    if meta_title:
+        return meta_title
+
+    lines = [line.strip() for line in first_page_text.splitlines() if line.strip()]
+    if lines:
+        first = lines[0]
+        if 5 <= len(first) <= 300:
+            return first
+
+    return file_stem
+
+
+def infer_venue(text: str) -> str:
+    if not text:
+        return ""
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    joined = "\n".join(lines[:20])
+
+    patterns = [
+        r"(Proceedings of [^\n]+)",
+        r"(In Proceedings of [^\n]+)",
+        r"(NeurIPS\s+\d{4})",
+        r"(ICML\s+\d{4})",
+        r"(ICLR\s+\d{4})",
+        r"(ACL\s+\d{4})",
+        r"(EMNLP\s+\d{4})",
+        r"(CVPR\s+\d{4})",
+        r"(ICCV\s+\d{4})",
+        r"(ECCV\s+\d{4})",
+        r"(AAAI\s+\d{4})",
+        r"(IJCAI\s+\d{4})",
+        r"(KDD\s+\d{4})",
+        r"(WWW\s+\d{4})",
+    ]
+
+    for pattern in patterns:
+        m = re.search(pattern, joined, flags=re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+
+    return ""
+
+
+def infer_doi(text: str) -> str:
+    if not text:
+        return ""
+    m = re.search(r"\b(10\.\d{4,9}/[-._;()/:A-Z0-9]+)\b", text, flags=re.IGNORECASE)
+    if not m:
+        return ""
+    return m.group(1).rstrip(".,);]")
+
+
+def build_snippet(text: str, max_length: int = 500) -> str:
+    if not text:
+        return ""
+    compact = re.sub(r"\s+", " ", text).strip()
+    if len(compact) <= max_length:
+        return compact
+    return compact[: max_length - 3].rstrip() + "..."
+
+
 def extract_paper_metadata(pdf_path: Path) -> dict[str, str]:
     """
-    현재는 파일명 기반 메타 추출.
-    연도는 파일명에서 4자리 후보를 찾되,
-    normalize_year()를 통과한 값만 사용한다.
+    파일명 + PDF 첫 페이지 텍스트 + PDF 메타데이터를 조합해 메타를 추출한다.
     """
     name = pdf_path.stem
+    first_page_text = extract_pdf_first_page_text(pdf_path)
+    pdf_info = extract_pdf_document_info(pdf_path)
 
-    year_candidates = extract_year_candidates(name)
-    year = choose_best_year(*year_candidates)
+    filename_year_candidates = extract_year_candidates(name)
+    first_page_year_candidates = extract_year_candidates(first_page_text)
 
-    field_code = infer_field_code_from_text(name)
+    year = choose_best_year(
+        *filename_year_candidates,
+        *first_page_year_candidates,
+    )
+
+    title = infer_title(name, first_page_text, pdf_info)
+    first_author = infer_first_author(first_page_text) or pdf_info.get("author", "").strip()
+    venue = infer_venue(first_page_text)
+    doi = infer_doi(first_page_text)
+    snippet = build_snippet(first_page_text)
+
+    field_source = " ".join(
+        part for part in [
+            name,
+            title,
+            first_page_text[:3000],
+            venue,
+            pdf_info.get("subject", ""),
+            pdf_info.get("keywords", ""),
+        ]
+        if part
+    )
+    field_code = infer_field_code_from_text(field_source)
 
     return {
         "field_code": field_code,
         "year": year,
-        "first_author": "",
-        "venue": "",
-        "title": name,
-        "doi": "",
-        "snippet": "",
+        "first_author": first_author,
+        "venue": venue,
+        "title": title,
+        "doi": doi,
+        "snippet": snippet,
     }
 
 
@@ -431,7 +593,6 @@ class PaperOrganizer:
         self.log_fn = log_fn or (lambda msg: None)
         self.cancel_event = cancel_event or threading.Event()
 
-        # gui.py 호환용
         self.crossref_mailto = crossref_mailto
         self.crossref_cache_days = crossref_cache_days
 
@@ -591,6 +752,87 @@ def scan_existing_pdfs(
     logger(f"[SCAN] 기존 PDF 처리 완료: {count}건")
 
 
+def repair_misplaced_year_folders(
+    output_dir: Path,
+    log_fn: Callable[[str], None] | None = None,
+    cancel_event: threading.Event | None = None,
+) -> int:
+    logger = log_fn or (lambda msg: None)
+    output_dir = Path(output_dir).resolve()
+
+    moved_count = 0
+
+    for pdf_path in output_dir.rglob("*.pdf"):
+        if cancel_event is not None and cancel_event.is_set():
+            logger("[CANCEL] 연도 폴더 보정 취소됨")
+            break
+
+        if not pdf_path.is_file():
+            continue
+
+        if "LOG" in pdf_path.parts:
+            continue
+
+        try:
+            rel = pdf_path.relative_to(output_dir)
+        except ValueError:
+            continue
+
+        parts = rel.parts
+        if len(parts) < 3:
+            continue
+
+        current_field = parts[0]
+        current_year = parts[1]
+
+        meta = extract_paper_metadata(pdf_path)
+        repaired_year = normalize_year(meta.get("year"))
+
+        if repaired_year == "UnknownYear":
+            logger(f"[REPAIR-SKIP] 연도 판별 불가: {pdf_path}")
+            continue
+
+        if repaired_year == current_year:
+            continue
+
+        target_pdf = build_output_pdf_path(output_dir, current_field, repaired_year, pdf_path)
+        target_pdf.parent.mkdir(parents=True, exist_ok=True)
+        target_pdf = unique_path(target_pdf)
+
+        try:
+            shutil.move(str(pdf_path), str(target_pdf))
+            moved_count += 1
+            logger(f"[REPAIR] PDF 이동: {pdf_path} -> {target_pdf}")
+        except Exception as exc:
+            logger(f"[ERROR] PDF 이동 실패: {pdf_path} | {exc}")
+            continue
+
+        old_meta = pdf_path.with_suffix(".json")
+        new_meta = target_pdf.with_suffix(".json")
+
+        if old_meta.exists():
+            try:
+                data = json.loads(old_meta.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+
+            data["stored_path"] = str(target_pdf)
+            data["field_code"] = current_field
+            data["year"] = repaired_year
+
+            try:
+                new_meta.write_text(
+                    json.dumps(data, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                old_meta.unlink(missing_ok=True)
+            except Exception as exc:
+                logger(f"[WARN] 메타 갱신 실패: {old_meta} | {exc}")
+
+    logger(f"[REPAIR] 연도 폴더 보정 완료: {moved_count}건")
+    return moved_count
+
+
 def run_reindex(
     args,
     log_fn: Callable[[str], None] | None = None,
@@ -602,7 +844,7 @@ def run_reindex(
     log_dir = output_dir / "LOG"
     db_path = log_dir / "paper_index.sqlite3"
 
-    _ = crossref_cache_days  # gui.py 호환용
+    _ = crossref_cache_days
 
     index = PaperIndex(db_path)
     try:
@@ -657,3 +899,32 @@ def run_reindex(
         logger(f"[REINDEX] 완료: {restored}건")
     finally:
         index.close()
+
+
+def repair_and_reindex(
+    args,
+    log_fn: Callable[[str], None] | None = None,
+    cancel_event: threading.Event | None = None,
+    crossref_cache_days: int = 180,
+) -> None:
+    logger = log_fn or (lambda msg: None)
+    output_dir = Path(args.output).resolve()
+
+    logger("[REPAIR] 연도 폴더 보정 시작")
+    repair_misplaced_year_folders(
+        output_dir=output_dir,
+        log_fn=logger,
+        cancel_event=cancel_event,
+    )
+
+    if cancel_event is not None and cancel_event.is_set():
+        logger("[CANCEL] 보정 후 재인덱싱 취소됨")
+        return
+
+    logger("[REPAIR] 재인덱싱 시작")
+    run_reindex(
+        args,
+        log_fn=logger,
+        cancel_event=cancel_event,
+        crossref_cache_days=crossref_cache_days,
+    )

@@ -26,7 +26,7 @@ from .core import (
     PDFCreatedHandler,
     PaperIndex,
     PaperOrganizer,
-    run_reindex,
+    repair_and_reindex,
     scan_existing_pdfs,
 )
 
@@ -197,9 +197,6 @@ class OrganizerGUI:
 
         self.append_log("[GUI] 애플리케이션 시작")
 
-    # ----------------------------
-    # UI
-    # ----------------------------
     def _build_ui(self) -> None:
         outer = ttk.Frame(self.root, padding=10)
         outer.pack(fill="both", expand=True)
@@ -242,7 +239,7 @@ class OrganizerGUI:
         self.cancel_btn = ttk.Button(controls, text="작업 취소", command=self.cancel_current_task)
         self.cancel_btn.grid(row=0, column=3, sticky="ew", padx=4, pady=4)
 
-        self.reindex_btn = ttk.Button(controls, text="재인덱싱", command=self.reindex)
+        self.reindex_btn = ttk.Button(controls, text="연도보정+재인덱싱", command=self.reindex)
         self.reindex_btn.grid(row=0, column=4, sticky="ew", padx=4, pady=4)
 
         ttk.Button(controls, text="캐시 삭제", command=self.clear_crossref_cache).grid(row=0, column=5, sticky="ew", padx=4, pady=4)
@@ -404,9 +401,6 @@ class OrganizerGUI:
         self.log_text = tk.Text(parent, wrap="word", state="disabled")
         self.log_text.pack(fill="both", expand=True)
 
-    # ----------------------------
-    # Logging / status
-    # ----------------------------
     def _set_text_widget(self, widget: tk.Text, content: str) -> None:
         widget.configure(state="normal")
         widget.delete("1.0", "end")
@@ -463,9 +457,6 @@ class OrganizerGUI:
     def show_error(self, title: str, message: str) -> None:
         self.root.after(0, lambda: messagebox.showerror(title, message))
 
-    # ----------------------------
-    # Settings
-    # ----------------------------
     def save_settings(self) -> None:
         try:
             cache_days = int(self.crossref_cache_days_var.get().strip() or "180")
@@ -492,9 +483,6 @@ class OrganizerGUI:
         except Exception as exc:
             messagebox.showerror("오류", f"설정 저장 실패: {exc}")
 
-    # ----------------------------
-    # Folder pick / validation
-    # ----------------------------
     def pick_watch_dir(self) -> None:
         path = filedialog.askdirectory(title="감시 폴더 선택")
         if path:
@@ -544,9 +532,6 @@ class OrganizerGUI:
             crossref_cache_days=self._get_crossref_cache_days(),
         )
 
-    # ----------------------------
-    # Button state / threading
-    # ----------------------------
     def _update_button_states(self) -> None:
         watching = self.observer is not None and self.observer.is_alive()
         worker_running = self.worker_thread is not None and self.worker_thread.is_alive()
@@ -596,9 +581,6 @@ class OrganizerGUI:
         self.set_status("취소 요청됨")
         self._update_button_states()
 
-    # ----------------------------
-    # Watch options
-    # ----------------------------
     def _list_all_subdirs(self, root: Path) -> list[Path]:
         results: list[Path] = []
         try:
@@ -715,9 +697,6 @@ class OrganizerGUI:
             return [watch_dir.resolve()]
         return [p.resolve() for p in self.selected_subdirs if p.exists() and p.is_dir()]
 
-    # ----------------------------
-    # Processing
-    # ----------------------------
     def run_once(self) -> None:
         paths = self._validate_paths()
         if not paths:
@@ -836,34 +815,38 @@ class OrganizerGUI:
         cache_days = self._get_crossref_cache_days()
 
         def task() -> None:
+            cancel_event = self.cancel_event
+
             class Args:
                 pass
 
             args = Args()
             args.output = str(output_dir)
 
-            self.append_log(f"[REINDEX] 재인덱싱 시작: {output_dir}")
+            self.append_log(f"[REPAIR] 연도 폴더 보정 + 재인덱싱 시작: {output_dir}")
 
             try:
-                run_reindex(
+                repair_and_reindex(
                     args,
                     log_fn=self.append_log,
-                    cancel_event=self.cancel_event,
+                    cancel_event=cancel_event,
                     crossref_cache_days=cache_days,
                 )
-                if self.cancel_event.is_set():
-                    self.append_log("[REINDEX] 재인덱싱 취소")
-                    self.set_status("재인덱싱 취소")
-                else:
-                    self.append_log("[REINDEX] 재인덱싱 완료")
-                    self.set_status("재인덱싱 완료")
-                    self.root.after(0, self.search)
-            except Exception as exc:
-                self.append_log(f"[ERROR] 재인덱싱 실패: {exc}")
-                self.set_status("재인덱싱 실패")
-                self.show_error("오류", f"재인덱싱 중 오류가 발생했습니다:\n{exc}")
 
-        self._run_in_thread(task, "재인덱싱 중")
+                if cancel_event.is_set():
+                    self.append_log("[REPAIR] 연도 폴더 보정/재인덱싱 취소")
+                    self.set_status("연도 폴더 보정/재인덱싱 취소")
+                else:
+                    self.append_log("[REPAIR] 연도 폴더 보정 + 재인덱싱 완료")
+                    self.set_status("연도 폴더 보정 + 재인덱싱 완료")
+                    self.root.after(0, self.search)
+
+            except Exception as exc:
+                self.append_log(f"[ERROR] 연도 폴더 보정/재인덱싱 실패: {exc}")
+                self.set_status("연도 폴더 보정/재인덱싱 실패")
+                self.show_error("오류", f"연도 폴더 보정/재인덱싱 중 오류가 발생했습니다:\n{exc}")
+
+        self._run_in_thread(task, "연도 폴더 보정 + 재인덱싱 중")
 
     def clear_crossref_cache(self) -> None:
         try:
@@ -884,9 +867,6 @@ class OrganizerGUI:
         except Exception as exc:
             messagebox.showerror("오류", f"캐시 삭제 실패: {exc}")
 
-    # ----------------------------
-    # Search
-    # ----------------------------
     def _clear_results(self) -> None:
         self.snippets.clear()
         self.sort_state.clear()
@@ -971,7 +951,7 @@ class OrganizerGUI:
         else:
             self._set_text_widget(self.snippet_text, "")
 
-    def _on_tree_select(self, event) -> None:
+    def _on_tree_select(self, _event) -> None:
         selected = self.tree.selection()
         if not selected:
             self._set_text_widget(self.snippet_text, "")
@@ -980,9 +960,6 @@ class OrganizerGUI:
         snippet = self.snippets.get(item, "")
         self._set_text_widget(self.snippet_text, snippet)
 
-    # ----------------------------
-    # Selection helpers
-    # ----------------------------
     def _selected_values(self):
         selected = self.tree.selection()
         if not selected:
@@ -1029,9 +1006,6 @@ class OrganizerGUI:
 
         return results
 
-    # ----------------------------
-    # Export / collect
-    # ----------------------------
     def _unique_destination(self, path: Path) -> Path:
         if not path.exists():
             return path
@@ -1230,9 +1204,6 @@ class OrganizerGUI:
 
         self._export_tree_items_to_csv(item_ids, "search_results.csv")
 
-    # ----------------------------
-    # Open helpers
-    # ----------------------------
     def _normalize_doi_url(self, doi: str) -> str:
         doi = doi.strip()
         if doi.startswith("http://") or doi.startswith("https://"):
@@ -1334,9 +1305,6 @@ class OrganizerGUI:
         except Exception as exc:
             messagebox.showerror("오류", f"열기에 실패했습니다: {exc}")
 
-    # ----------------------------
-    # Tree behavior
-    # ----------------------------
     def _on_tree_double_click(self, event) -> None:
         region = self.tree.identify("region", event.x, event.y)
         if region != "cell":
@@ -1394,9 +1362,6 @@ class OrganizerGUI:
         self.sort_state[column] = not reverse
         self._refresh_heading_arrows()
 
-    # ----------------------------
-    # Close
-    # ----------------------------
     def on_close(self) -> None:
         if self.worker_thread and self.worker_thread.is_alive():
             if not messagebox.askyesno("종료 확인", "작업이 실행 중입니다. 그래도 종료하시겠습니까?"):
@@ -1409,8 +1374,6 @@ class OrganizerGUI:
 
 
 def main() -> int:
-    import sys
-
     root = tk.Tk()
     style = ttk.Style()
     if "clam" in style.theme_names():
