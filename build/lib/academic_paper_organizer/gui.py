@@ -70,12 +70,12 @@ class FilteringEventHandler(FileSystemEventHandler):
 
 
 class OrganizerGUI:
-    COLUMNS = ("field", "year", "author", "venue", "title", "doi", "path")
+    COLUMNS = ("field", "year", "author", "venue", "title", "doi", "path", "original_path")
 
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Academic Paper Organizer GUI")
-        self.root.geometry("1180x760")
+        self.root.geometry("1320x780")
 
         self.watch_var = tk.StringVar()
         self.output_var = tk.StringVar()
@@ -88,7 +88,7 @@ class OrganizerGUI:
         self.status_var = tk.StringVar(value="대기 중")
 
         self.recursive_var = tk.BooleanVar(value=True)
-        self.watch_mode_var = tk.StringVar(value="all")  # all | selected
+        self.watch_mode_var = tk.StringVar(value="all")
         self.selected_subdirs: list[Path] = []
         self.selected_subdirs_label_var = tk.StringVar(value="선택된 하위 폴더 없음")
 
@@ -237,8 +237,12 @@ class OrganizerGUI:
         action_row.pack(fill="x", pady=(8, 8))
         ttk.Button(action_row, text="검색", command=self.search).pack(side="left")
         ttk.Button(action_row, text="필터 초기화", command=self.clear_filters).pack(side="left", padx=6)
-        ttk.Button(action_row, text="파일 열기", command=self.open_selected_file).pack(side="left", padx=(24, 6))
-        ttk.Button(action_row, text="폴더 열기", command=self.open_selected_folder).pack(side="left", padx=6)
+
+        ttk.Button(action_row, text="정리본 파일 열기", command=self.open_selected_file).pack(side="left", padx=(24, 6))
+        ttk.Button(action_row, text="정리본 폴더 열기", command=self.open_selected_folder).pack(side="left", padx=6)
+        ttk.Button(action_row, text="원본 파일 열기", command=self.open_selected_original_file).pack(side="left", padx=(24, 6))
+        ttk.Button(action_row, text="원본 폴더 열기", command=self.open_selected_original_folder).pack(side="left", padx=6)
+
         ttk.Button(action_row, text="DOI 열기", command=self.open_selected_doi).pack(side="left", padx=6)
         ttk.Button(action_row, text="선택 파일 모으기", command=self.collect_selected_files).pack(side="left", padx=(24, 6))
         ttk.Button(action_row, text="선택 파일 ZIP", command=self.export_selected_zip).pack(side="left", padx=6)
@@ -261,16 +265,18 @@ class OrganizerGUI:
             "venue": "저널/학회",
             "title": "제목",
             "doi": "DOI",
-            "path": "경로",
+            "path": "정리본 경로",
+            "original_path": "원본 경로",
         }
         widths = {
             "field": 70,
             "year": 70,
             "author": 100,
-            "venue": 170,
-            "title": 320,
+            "venue": 160,
+            "title": 260,
             "doi": 180,
-            "path": 300,
+            "path": 260,
+            "original_path": 320,
         }
 
         for col in self.COLUMNS:
@@ -754,7 +760,16 @@ class OrganizerGUI:
             item_id = self.tree.insert(
                 "",
                 "end",
-                values=(row.field_code, row.year, row.first_author, row.venue, row.title, row.doi, row.path),
+                values=(
+                    row.field_code,
+                    row.year,
+                    row.first_author,
+                    row.venue,
+                    row.title,
+                    row.doi,
+                    row.path,
+                    getattr(row, "original_path", ""),
+                ),
             )
             self.snippets[item_id] = row.snippet or ""
 
@@ -790,6 +805,15 @@ class OrganizerGUI:
         if not values:
             return None
         return Path(values[6])
+
+    def _selected_original_path(self) -> Path | None:
+        values = self._selected_values()
+        if not values:
+            return None
+        original = str(values[7]).strip()
+        if not original:
+            return None
+        return Path(original)
 
     def _selected_doi(self) -> str | None:
         values = self._selected_values()
@@ -956,7 +980,7 @@ class OrganizerGUI:
             messagebox.showinfo("안내", "먼저 검색 결과에서 파일을 선택해 주세요.")
             return
         if not path.exists():
-            messagebox.showwarning("경고", "파일이 존재하지 않습니다.")
+            messagebox.showwarning("경고", "정리본 파일이 존재하지 않습니다.")
             return
         self._open_path(path)
 
@@ -967,7 +991,28 @@ class OrganizerGUI:
             return
         target = path.parent
         if not target.exists():
-            messagebox.showwarning("경고", f"폴더가 존재하지 않습니다: {target}")
+            messagebox.showwarning("경고", f"정리본 폴더가 존재하지 않습니다: {target}")
+            return
+        self._open_path(target)
+
+    def open_selected_original_file(self) -> None:
+        path = self._selected_original_path()
+        if not path:
+            messagebox.showinfo("안내", "선택한 항목에 원본 경로 정보가 없습니다.")
+            return
+        if not path.exists():
+            messagebox.showwarning("경고", f"원본 파일이 존재하지 않습니다:\n{path}")
+            return
+        self._open_path(path)
+
+    def open_selected_original_folder(self) -> None:
+        path = self._selected_original_path()
+        if not path:
+            messagebox.showinfo("안내", "선택한 항목에 원본 경로 정보가 없습니다.")
+            return
+        target = path.parent
+        if not target.exists():
+            messagebox.showwarning("경고", f"원본 폴더가 존재하지 않습니다:\n{target}")
             return
         self._open_path(target)
 

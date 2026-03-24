@@ -24,11 +24,19 @@ class AppSettings:
     def load(cls, path: Path) -> "AppSettings":
         if not path.exists():
             return cls()
+
         data = json.loads(path.read_text(encoding="utf-8"))
+        if "selected_subdirs" not in data or data["selected_subdirs"] is None:
+            data["selected_subdirs"] = []
+
         return cls(**data)
 
     def save(self, path: Path) -> None:
         payload = asdict(self)
         if payload["selected_subdirs"] is None:
             payload["selected_subdirs"] = []
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
