@@ -7,6 +7,7 @@ import sqlite3
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -55,6 +56,78 @@ class PaperRow:
     snippet: str
 
 
+def _current_year() -> int:
+    return datetime.now().year
+
+
+def normalize_year(
+    year_value: str | int | None,
+    *,
+    allow_historic: bool = False,
+) -> str:
+    """
+    연도 문자열/숫자를 안전하게 정규화한다.
+
+    기본 정책:
+    - 숫자 4자리만 인정
+    - 현대 논문 기본 범위: 1950 ~ 현재연도+1
+    - allow_historic=True면 1800년 이후 허용
+    - 나머지는 UnknownYear
+    """
+    if year_value is None:
+        return "UnknownYear"
+
+    text = str(year_value).strip()
+    if not text:
+        return "UnknownYear"
+
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if len(digits) != 4:
+        return "UnknownYear"
+
+    year = int(digits)
+    current_year = _current_year()
+
+    min_year = 1800 if allow_historic else 1950
+    max_year = current_year + 1
+
+    if min_year <= year <= max_year:
+        return str(year)
+
+    return "UnknownYear"
+
+
+def extract_year_candidates(text: str) -> list[str]:
+    if not text:
+        return []
+    return re.findall(r"\b(18\d{2}|19\d{2}|20\d{2})\b", text)
+
+
+def choose_best_year(
+    *candidates: str | int | None,
+    allow_historic: bool = False,
+) -> str:
+    normalized: list[str] = []
+    for value in candidates:
+        y = normalize_year(value, allow_historic=allow_historic)
+        if y != "UnknownYear":
+            normalized.append(y)
+
+    if not normalized:
+        return "UnknownYear"
+
+    counts: dict[str, int] = {}
+    for y in normalized:
+        counts[y] = counts.get(y, 0) + 1
+
+    best = sorted(
+        counts.items(),
+        key=lambda item: (item[1], int(item[0])),
+        reverse=True,
+    )[0][0]
+    return best
+
+
 def unique_path(path: Path) -> Path:
     if not path.exists():
         return path
@@ -96,7 +169,7 @@ def write_pdf_sidecar_metadata(
         "original_path": str(original_path),
         "stored_path": str(stored_path),
         "field_code": field_code,
-        "year": year,
+        "year": normalize_year(year),
         "author": author,
         "venue": venue,
     }
@@ -135,6 +208,7 @@ class PaperIndex:
         )
         self.conn.commit()
         self._ensure_original_path_column()
+        self._ensure_crossref_cache_table()
 
     def _ensure_original_path_column(self) -> None:
         cur = self.conn.cursor()
@@ -144,8 +218,26 @@ class PaperIndex:
             cur.execute("ALTER TABLE papers ADD COLUMN original_path TEXT")
             self.conn.commit()
 
+    def _ensure_crossref_cache_table(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS crossref_cache (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        self.conn.commit()
+
     def close(self) -> None:
         self.conn.close()
+
+    def clear_crossref_cache(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM crossref_cache")
+        self.conn.commit()
 
     def add_paper(
         self,
@@ -160,6 +252,7 @@ class PaperIndex:
         original_path: str,
         snippet: str,
     ) -> None:
+        safe_year = normalize_year(year)
         cur = self.conn.cursor()
         cur.execute(
             """
@@ -169,7 +262,7 @@ class PaperIndex:
             """,
             (
                 field_code,
-                year,
+                safe_year,
                 first_author,
                 venue,
                 title,
@@ -223,7 +316,7 @@ class PaperIndex:
 
         if year:
             sql += " AND year = ?"
-            params.append(year)
+            params.append(normalize_year(year))
 
         if field_code:
             sql += " AND field_code LIKE ?"
@@ -294,15 +387,21 @@ def infer_field_code_from_text(text: str) -> str:
 
 
 def extract_paper_metadata(pdf_path: Path) -> dict[str, str]:
+    """
+    현재는 파일명 기반 메타 추출.
+    연도는 파일명에서 4자리 후보를 찾되,
+    normalize_year()를 통과한 값만 사용한다.
+    """
     name = pdf_path.stem
-    year_match = re.search(r"(19|20)\d{2}", name)
-    year = year_match.group(0) if year_match else ""
+
+    year_candidates = extract_year_candidates(name)
+    year = choose_best_year(*year_candidates)
 
     field_code = infer_field_code_from_text(name)
 
     return {
         "field_code": field_code,
-        "year": year or "UnknownYear",
+        "year": year,
         "first_author": "",
         "venue": "",
         "title": name,
@@ -313,7 +412,7 @@ def extract_paper_metadata(pdf_path: Path) -> dict[str, str]:
 
 def build_output_pdf_path(output_dir: Path, field_code: str, year: str, src_pdf: Path) -> Path:
     safe_field = field_code.strip() or "ETC"
-    safe_year = year.strip() or "UnknownYear"
+    safe_year = normalize_year(year)
     return output_dir / safe_field / safe_year / src_pdf.name
 
 
@@ -324,11 +423,17 @@ class PaperOrganizer:
         output_dir: Path,
         log_fn: Callable[[str], None] | None = None,
         cancel_event: threading.Event | None = None,
+        crossref_mailto: str = "your-email@example.com",
+        crossref_cache_days: int = 180,
     ):
         self.watch_dir = Path(watch_dir).resolve()
         self.output_dir = Path(output_dir).resolve()
         self.log_fn = log_fn or (lambda msg: None)
         self.cancel_event = cancel_event or threading.Event()
+
+        # gui.py 호환용
+        self.crossref_mailto = crossref_mailto
+        self.crossref_cache_days = crossref_cache_days
 
         log_dir = self.output_dir / "LOG"
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -380,7 +485,7 @@ class PaperOrganizer:
                 return
 
             field_code = meta.get("field_code", "").strip() or "ETC"
-            year = meta.get("year", "").strip() or "UnknownYear"
+            year = normalize_year(meta.get("year", "").strip() or "UnknownYear")
             first_author = meta.get("first_author", "").strip()
             venue = meta.get("venue", "").strip()
             title = meta.get("title", "").strip() or pdf_path.stem
@@ -490,11 +595,14 @@ def run_reindex(
     args,
     log_fn: Callable[[str], None] | None = None,
     cancel_event: threading.Event | None = None,
+    crossref_cache_days: int = 180,
 ) -> None:
     logger = log_fn or (lambda msg: None)
     output_dir = Path(args.output).resolve()
     log_dir = output_dir / "LOG"
     db_path = log_dir / "paper_index.sqlite3"
+
+    _ = crossref_cache_days  # gui.py 호환용
 
     index = PaperIndex(db_path)
     try:
@@ -524,13 +632,20 @@ def run_reindex(
                 if not stored_pdf.exists():
                     continue
 
+                field_code = str(data.get("field_code", "ETC")).strip() or "ETC"
+                year = normalize_year(data.get("year", "UnknownYear"))
+                first_author = str(data.get("author", ""))
+                venue = str(data.get("venue", ""))
+                title = str(data.get("title", stored_pdf.stem))
+                doi = str(data.get("doi", ""))
+
                 index.add_paper(
-                    field_code=str(data.get("field_code", "ETC")),
-                    year=str(data.get("year", "UnknownYear")),
-                    first_author=str(data.get("author", "")),
-                    venue=str(data.get("venue", "")),
-                    title=str(data.get("title", stored_pdf.stem)),
-                    doi=str(data.get("doi", "")),
+                    field_code=field_code,
+                    year=year,
+                    first_author=first_author,
+                    venue=venue,
+                    title=title,
+                    doi=doi,
                     path=str(stored_pdf),
                     original_path=str(original_path),
                     snippet="",
