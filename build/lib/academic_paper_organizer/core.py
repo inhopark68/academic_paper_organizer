@@ -13,6 +13,35 @@ from typing import Callable
 from watchdog.events import FileSystemEventHandler
 
 
+FIELD_CODES: dict[str, str] = {
+    "AI": "인공지능 일반",
+    "ML": "머신러닝",
+    "DL": "딥러닝",
+    "NLP": "자연어처리",
+    "CV": "컴퓨터비전",
+    "SP": "음성처리",
+    "RS": "추천시스템",
+    "DM": "데이터마이닝",
+    "IR": "정보검색",
+    "RL": "강화학습",
+    "ROB": "로보틱스",
+    "HCI": "인간-컴퓨터 상호작용",
+    "SYS": "시스템",
+    "NET": "네트워크",
+    "SEC": "보안",
+    "DB": "데이터베이스",
+    "BIO": "바이오인포매틱스",
+    "MED": "의료AI",
+    "EDU": "교육/교육AI",
+    "MATH": "수학",
+    "STAT": "통계",
+    "PHY": "물리",
+    "CHEM": "화학",
+    "ECO": "경제/계량",
+    "ETC": "기타",
+}
+
+
 @dataclass
 class PaperRow:
     field_code: str
@@ -227,13 +256,52 @@ class PaperIndex:
         ]
 
 
+def infer_field_code_from_text(text: str) -> str:
+    t = text.lower()
+
+    rules: list[tuple[str, list[str]]] = [
+        ("NLP", ["nlp", "language model", "llm", "transformer", "bert", "gpt", "token", "prompt"]),
+        ("CV", ["cv", "vision", "image", "video", "object detection", "segmentation", "recognition"]),
+        ("RL", ["reinforcement learning", "rl", "policy gradient", "q-learning", "mdp"]),
+        ("RS", ["recommendation", "recommender system", "collaborative filtering"]),
+        ("IR", ["information retrieval", "retrieval", "search engine", "ranking"]),
+        ("SP", ["speech", "asr", "tts", "voice", "speaker recognition"]),
+        ("ROB", ["robot", "robotics", "manipulation", "navigation"]),
+        ("SEC", ["security", "privacy", "attack", "defense", "malware", "cryptography"]),
+        ("DB", ["database", "sql", "query optimization", "transaction"]),
+        ("BIO", ["bioinformatics", "genomics", "protein", "sequence", "molecule"]),
+        ("MED", ["medical", "clinical", "healthcare", "diagnosis", "radiology"]),
+        ("STAT", ["statistics", "bayesian", "causal inference", "probability"]),
+        ("MATH", ["algebra", "geometry", "theorem", "proof"]),
+        ("NET", ["network", "routing", "wireless", "tcp", "5g"]),
+        ("SYS", ["system", "distributed", "operating system", "compiler", "storage"]),
+        ("HCI", ["human-computer interaction", "hci", "user study", "usability"]),
+        ("DM", ["data mining", "clustering", "association rule"]),
+        ("DL", ["deep learning", "neural network", "cnn", "rnn", "autoencoder"]),
+        ("ML", ["machine learning", "ml", "xgboost", "lightgbm", "svm"]),
+        ("AI", ["artificial intelligence", "ai", "planning", "reasoning"]),
+        ("PHY", ["physics", "quantum", "particle"]),
+        ("CHEM", ["chemistry", "chemical", "reaction"]),
+        ("ECO", ["economics", "econometrics", "market"]),
+        ("EDU", ["education", "learning analytics", "intelligent tutoring"]),
+    ]
+
+    for code, keywords in rules:
+        if any(keyword in t for keyword in keywords):
+            return code
+
+    return "ETC"
+
+
 def extract_paper_metadata(pdf_path: Path) -> dict[str, str]:
     name = pdf_path.stem
     year_match = re.search(r"(19|20)\d{2}", name)
     year = year_match.group(0) if year_match else ""
 
+    field_code = infer_field_code_from_text(name)
+
     return {
-        "field_code": "ETC",
+        "field_code": field_code,
         "year": year or "UnknownYear",
         "first_author": "",
         "venue": "",
