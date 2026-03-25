@@ -6,6 +6,7 @@ import shutil
 import sqlite3
 import threading
 import time
+import requests
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -49,12 +50,16 @@ class PaperRow:
     field_code: str
     year: str
     first_author: str
+    authors_json: str
     venue: str
     title: str
     doi: str
     path: str
     original_path: str
     snippet: str
+    doc_type: str
+    doc_score: str
+    doc_reasons_json: str
 
 
 def _current_year() -> int:
@@ -168,7 +173,11 @@ def write_pdf_sidecar_metadata(
     field_code: str,
     year: str,
     author: str,
+    authors: list[str],
     venue: str,
+    doc_type: str,
+    doc_score: str,
+    doc_reasons_json: str,
 ) -> None:
     payload = {
         "title": title,
@@ -178,7 +187,11 @@ def write_pdf_sidecar_metadata(
         "field_code": field_code,
         "year": normalize_year(year),
         "author": author,
+        "authors": authors,
         "venue": venue,
+        "doc_type": doc_type,
+        "doc_score": doc_score,
+        "doc_reasons_json": doc_reasons_json,
     }
     meta_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
@@ -244,18 +257,24 @@ class PaperIndex:
                 field_code TEXT,
                 year TEXT,
                 first_author TEXT,
+                authors_json TEXT,
                 venue TEXT,
                 title TEXT,
                 doi TEXT,
                 path TEXT,
                 original_path TEXT,
                 snippet TEXT,
+                doc_type TEXT,
+                doc_score TEXT,
+                doc_reasons_json TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
         self.conn.commit()
         self._ensure_original_path_column()
+        self._ensure_authors_json_column()
+        self._ensure_doc_type_columns()
         self._ensure_crossref_cache_table()
 
     def _ensure_original_path_column(self) -> None:
@@ -265,6 +284,28 @@ class PaperIndex:
         if "original_path" not in columns:
             cur.execute("ALTER TABLE papers ADD COLUMN original_path TEXT")
             self.conn.commit()
+
+    def _ensure_authors_json_column(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute("PRAGMA table_info(papers)")
+        columns = [row[1] for row in cur.fetchall()]
+        if "authors_json" not in columns:
+            cur.execute("ALTER TABLE papers ADD COLUMN authors_json TEXT")
+            self.conn.commit()
+
+    def _ensure_doc_type_columns(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute("PRAGMA table_info(papers)")
+        columns = [row[1] for row in cur.fetchall()]
+
+        if "doc_type" not in columns:
+            cur.execute("ALTER TABLE papers ADD COLUMN doc_type TEXT")
+        if "doc_score" not in columns:
+            cur.execute("ALTER TABLE papers ADD COLUMN doc_score TEXT")
+        if "doc_reasons_json" not in columns:
+            cur.execute("ALTER TABLE papers ADD COLUMN doc_reasons_json TEXT")
+
+        self.conn.commit()
 
     def _ensure_crossref_cache_table(self) -> None:
         cur = self.conn.cursor()
@@ -287,37 +328,76 @@ class PaperIndex:
         cur.execute("DELETE FROM crossref_cache")
         self.conn.commit()
 
+    def get_crossref_cache(self, key: str, max_age_days: int = 180) -> str | None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT value
+            FROM crossref_cache
+            WHERE key = ?
+              AND datetime(created_at) >= datetime('now', ?)
+            """,
+            (key, f"-{max_age_days} days"),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return row[0]
+
+    def set_crossref_cache(self, key: str, value: str) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO crossref_cache (key, value, created_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                created_at = CURRENT_TIMESTAMP
+            """,
+            (key, value),
+        )
+        self.conn.commit()
+
     def add_paper(
         self,
         *,
         field_code: str,
         year: str,
         first_author: str,
+        authors_json: str,
         venue: str,
         title: str,
         doi: str,
         path: str,
         original_path: str,
         snippet: str,
+        doc_type: str,
+        doc_score: str,
+        doc_reasons_json: str,
     ) -> None:
         safe_year = normalize_year(year)
         cur = self.conn.cursor()
         cur.execute(
             """
             INSERT INTO papers (
-                field_code, year, first_author, venue, title, doi, path, original_path, snippet
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                field_code, year, first_author, authors_json, venue, title, doi,
+                path, original_path, snippet, doc_type, doc_score, doc_reasons_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 field_code,
                 safe_year,
                 first_author,
+                authors_json,
                 venue,
                 title,
                 doi,
                 path,
                 original_path,
                 snippet,
+                doc_type,
+                doc_score,
+                doc_reasons_json,
             ),
         )
         self.conn.commit()
@@ -342,12 +422,16 @@ class PaperIndex:
                 field_code,
                 year,
                 first_author,
+                COALESCE(authors_json, '[]') AS authors_json,
                 venue,
                 title,
                 doi,
                 path,
                 COALESCE(original_path, '') AS original_path,
-                snippet
+                snippet,
+                COALESCE(doc_type, 'unknown') AS doc_type,
+                COALESCE(doc_score, '') AS doc_score,
+                COALESCE(doc_reasons_json, '[]') AS doc_reasons_json
             FROM papers
             WHERE 1=1
         """
@@ -359,8 +443,9 @@ class PaperIndex:
             params.extend([like, like, like])
 
         if author:
-            sql += " AND first_author LIKE ?"
-            params.append(f"%{author}%")
+            like_author = f"%{author}%"
+            sql += " AND (first_author LIKE ? OR authors_json LIKE ?)"
+            params.extend([like_author, like_author])
 
         if year:
             sql += " AND year = ?"
@@ -386,12 +471,16 @@ class PaperIndex:
                 field_code=row["field_code"] or "",
                 year=row["year"] or "",
                 first_author=row["first_author"] or "",
+                authors_json=row["authors_json"] or "[]",
                 venue=row["venue"] or "",
                 title=row["title"] or "",
                 doi=row["doi"] or "",
                 path=row["path"] or "",
                 original_path=row["original_path"] or "",
                 snippet=row["snippet"] or "",
+                doc_type=row["doc_type"] or "unknown",
+                doc_score=row["doc_score"] or "",
+                doc_reasons_json=row["doc_reasons_json"] or "[]",
             )
             for row in rows
         ]
@@ -434,10 +523,262 @@ def infer_field_code_from_text(text: str) -> str:
     return "ETC"
 
 
-def infer_first_author(text: str) -> str:
+def classify_document_type(
+    *,
+    first_page_text: str,
+    pdf_info: dict[str, str],
+    title: str,
+    venue: str,
+    doi: str,
+) -> tuple[str, float, list[str]]:
+    text = " ".join(
+        part for part in [
+            first_page_text or "",
+            pdf_info.get("title", ""),
+            pdf_info.get("subject", ""),
+            pdf_info.get("keywords", ""),
+            title or "",
+            venue or "",
+            doi or "",
+        ]
+        if part
+    )
+
+    t = text.lower()
+    score = 0.0
+    reasons: list[str] = []
+
+    positive_rules = [
+        ("doi", 2.5),
+        ("abstract", 1.5),
+        ("introduction", 1.0),
+        ("references", 1.5),
+        ("keywords", 0.8),
+        ("proceedings", 1.5),
+        ("journal", 1.0),
+        ("volume", 0.7),
+        ("issue", 0.5),
+        ("et al", 0.8),
+        ("citation", 0.5),
+    ]
+
+    for token, weight in positive_rules:
+        if token in t:
+            score += weight
+            reasons.append(f"+ {token}")
+
+    if doi:
+        score += 2.0
+        reasons.append("+ doi field")
+
+    if venue:
+        score += 1.5
+        reasons.append("+ venue detected")
+
+    academic_venues = [
+        "frontiers in",
+        "ieee",
+        "acm",
+        "springer",
+        "elsevier",
+        "neurips",
+        "icml",
+        "iclr",
+        "acl",
+        "emnlp",
+        "cvpr",
+        "iccv",
+        "eccv",
+        "aaai",
+        "ijcai",
+        "kdd",
+        "www",
+        "nature",
+        "science",
+        "cell",
+        "lancet",
+    ]
+    if any(v in t for v in academic_venues):
+        score += 2.0
+        reasons.append("+ academic venue")
+
+    negative_rules = [
+        ("invoice", -3.0),
+        ("quotation", -2.5),
+        ("resume", -2.5),
+        ("curriculum vitae", -2.5),
+        ("contract", -2.0),
+        ("proposal", -1.5),
+        ("brochure", -2.0),
+        ("manual", -1.5),
+        ("installation guide", -1.5),
+        ("meeting notes", -2.0),
+        ("minutes", -2.0),
+        ("price", -1.0),
+        ("policy", -1.0),
+        ("press release", -2.0),
+        ("statement", -1.0),
+    ]
+    for token, weight in negative_rules:
+        if token in t:
+            score += weight
+            reasons.append(f"- {token}")
+
+    if "references" not in t and "abstract" not in t and not doi and not venue:
+        score -= 1.5
+        reasons.append("- no scholarly markers")
+
+    if score >= 3.0:
+        return "academic", score, reasons
+    if score <= 0.0:
+        return "non_academic", score, reasons
+    return "unknown", score, reasons
+
+
+
+
+def _normalize_compare_text(text: str) -> str:
+    text = re.sub(r"\s+", " ", text or "").strip().casefold()
+    text = re.sub(r"[^\w가-힣 ]+", "", text)
+    return text
+
+
+def _is_similar_text(a: str, b: str) -> bool:
+    na = _normalize_compare_text(a)
+    nb = _normalize_compare_text(b)
+    if not na or not nb:
+        return False
+    return na == nb or na in nb or nb in na
+
+
+def clean_front_matter(text: str) -> str:
     """
-    매우 단순한 휴리스틱.
-    첫 페이지 상단부에서 저자 후보를 한 줄 찾는다.
+    첫 페이지 상단의 편집 정보 / citation / correspondence 같은 잡음을 제거한다.
+    """
+    if not text:
+        return ""
+
+    lines = [line.rstrip() for line in text.splitlines()]
+    cleaned: list[str] = []
+
+    skip_citation_block = False
+
+    for line in lines:
+        stripped = line.strip()
+        lowered = stripped.lower()
+
+        if not stripped:
+            continue
+
+        if lowered.startswith("citation:"):
+            skip_citation_block = True
+            continue
+
+        if skip_citation_block:
+            if (
+                10 <= len(stripped) <= 200
+                and not lowered.startswith("doi:")
+                and not lowered.startswith("frontiers in ")
+                and "doi:" not in lowered
+                and not re.match(r"^[A-Z\s]+$", stripped)
+            ):
+                skip_citation_block = False
+            else:
+                continue
+
+        if any(
+            lowered.startswith(prefix)
+            for prefix in [
+                "review",
+                "published:",
+                "edited by:",
+                "reviewed by:",
+                "*correspondence:",
+                "specialty section:",
+                "received:",
+                "accepted:",
+                "published:",
+            ]
+        ):
+            continue
+
+        if lowered in {"reviewed by:", "edited by:", "specialty section:"}:
+            continue
+
+        if "@" in lowered and ("correspondence" in lowered or lowered.endswith('.edu') or lowered.endswith('.org') or lowered.endswith('.com')):
+            continue
+
+        cleaned.append(stripped)
+
+    return "\n".join(cleaned)
+
+
+def looks_like_author_line(line: str) -> bool:
+    if not line:
+        return False
+
+    s = re.sub(r"\s+", " ", line).strip()
+    lower = s.lower()
+
+    if len(s) < 3 or len(s) > 160:
+        return False
+
+    if "@" in lower:
+        return False
+
+    if any(token in lower for token in [
+        "abstract", "introduction", "keywords", "university", "department",
+        "institute", "laboratory", "college", "school", "faculty", "proceedings",
+        "conference", "journal", "doi.org", "arxiv", "submitted", "accepted"
+    ]):
+        return False
+
+    if re.search(r"\b(and|&)\b", s, flags=re.IGNORECASE) or ";" in s:
+        return True
+
+    tokens = re.findall(r"[A-Za-z가-힣][A-Za-z가-힣.'-]*", s)
+    if 2 <= len(tokens) <= 12:
+        short_tokens = sum(1 for t in tokens if len(t) <= 2)
+        long_tokens = sum(1 for t in tokens if len(t) >= 3)
+        if long_tokens >= 2 and short_tokens <= len(tokens) // 2 + 1:
+            return True
+
+    return False
+
+
+def infer_header_title_lines(first_page_text: str, pdf_info: dict[str, str]) -> list[str]:
+    lines = [line.strip() for line in first_page_text.splitlines() if line.strip()]
+    if not lines:
+        return []
+
+    meta_title = pdf_info.get("title", "").strip()
+    collected: list[str] = []
+
+    for line in lines[:8]:
+        lower = line.lower()
+
+        if any(token in lower for token in ["abstract", "introduction", "keywords"]):
+            break
+
+        if looks_like_author_line(line):
+            break
+
+        if "@" in lower:
+            break
+
+        if any(token in lower for token in ["university", "department", "institute", "college", "school", "faculty", "laboratory", "lab"]):
+            break
+
+        if 5 <= len(line) <= 220:
+            collected.append(line)
+            if meta_title and _is_similar_text(" ".join(collected), meta_title):
+                break
+
+    return collected
+def infer_author_block(text: str, known_title: str = "") -> str:
+    """
+    첫 페이지 상단에서 저자 블록 후보를 추출한다.
+    제목과 동일하거나 제목의 연장선처럼 보이는 줄은 제외한다.
     """
     if not text:
         return ""
@@ -446,32 +787,142 @@ def infer_first_author(text: str) -> str:
     if not lines:
         return ""
 
-    # 제목 다음 1~4줄 안에서 이메일/소속 전 줄을 저자 후보로 간주
-    upper_lines = lines[:8]
-    for line in upper_lines[1:5]:
+    block: list[str] = []
+
+    for line in lines[1:10]:
         lowered = line.lower()
+
+        if any(token in lowered for token in ["abstract", "introduction", "keywords"]):
+            break
+
+        if len(line) > 180:
+            continue
+
         if "@" in lowered:
             continue
-        if any(token in lowered for token in ["university", "department", "school", "institute", "lab", "college"]):
-            continue
-        if len(line) > 120:
-            continue
-        if re.search(r"[A-Za-z]", line):
-            return line
 
-    return ""
+        if known_title and _is_similar_text(line, known_title):
+            continue
+
+        if any(
+            token in lowered
+            for token in [
+                "university",
+                "department",
+                "school",
+                "institute",
+                "laboratory",
+                "lab",
+                "college",
+                "faculty",
+            ]
+        ):
+            continue
+
+        if looks_like_author_line(line):
+            block.append(line)
+
+    return " ; ".join(block).strip()
+
+
+def parse_authors(author_text: str) -> list[str]:
+    """
+    저자 문자열을 분리/정규화한다.
+    """
+    if not author_text:
+        return []
+
+    text = author_text.replace("\n", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+
+    text = re.sub(r"\s+(and|&)\s+", "; ", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?<=\w)[0-9*†‡]+", "", text)
+
+    text = re.sub(r"\([^)]*@[^)]*\)", "", text)
+    text = re.sub(
+        r"\([^)]*(University|Department|Institute|School|College|Laboratory|Lab|Faculty)[^)]*\)",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    parts: list[str]
+
+    if ";" in text:
+        parts = [p.strip() for p in text.split(";") if p.strip()]
+    else:
+        comma_parts = [p.strip() for p in text.split(",") if p.strip()]
+        if len(comma_parts) >= 4 and len(comma_parts) % 2 == 0:
+            parts = [
+                f"{comma_parts[i]}, {comma_parts[i + 1]}"
+                for i in range(0, len(comma_parts), 2)
+            ]
+        else:
+            parts = comma_parts
+
+    cleaned: list[str] = []
+
+    for name in parts:
+        name = re.sub(r"\s+", " ", name).strip()
+        name = re.sub(r"(?<=\w)[0-9*†‡]+$", "", name).strip()
+
+        if re.search(
+            r"\b(University|Department|Institute|School|College|Faculty|Laboratory|Lab|@)\b",
+            name,
+            flags=re.IGNORECASE,
+        ):
+            continue
+
+        if "," in name:
+            sub = [x.strip() for x in name.split(",") if x.strip()]
+            if len(sub) == 2:
+                family, given = sub
+                name = f"{given} {family}".strip()
+
+        if len(name) < 2 or len(name) > 80:
+            continue
+
+        cleaned.append(name)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for name in cleaned:
+        key = name.casefold()
+        if key not in seen:
+            seen.add(key)
+            deduped.append(name)
+
+    return deduped
+
+
+def infer_first_author(text: str) -> str:
+    """
+    호환용 함수.
+    """
+    author_block = infer_author_block(text)
+    authors = parse_authors(author_block)
+    return authors[0] if authors else ""
 
 
 def infer_title(file_stem: str, first_page_text: str, pdf_info: dict[str, str]) -> str:
     meta_title = pdf_info.get("title", "").strip()
-    if meta_title:
+    meta_author = pdf_info.get("author", "").strip()
+
+    if meta_title and not _is_similar_text(meta_title, meta_author):
         return meta_title
 
+    title_lines = infer_header_title_lines(first_page_text, pdf_info)
+    if title_lines:
+        candidate = " ".join(title_lines).strip()
+        if 5 <= len(candidate) <= 300:
+            return candidate
+
     lines = [line.strip() for line in first_page_text.splitlines() if line.strip()]
-    if lines:
-        first = lines[0]
-        if 5 <= len(first) <= 300:
-            return first
+    for line in lines[:5]:
+        if looks_like_author_line(line):
+            continue
+        if 5 <= len(line) <= 300:
+            return line
 
     return file_stem
 
@@ -481,29 +932,48 @@ def infer_venue(text: str) -> str:
         return ""
 
     lines = [line.strip() for line in text.splitlines() if line.strip()]
-    joined = "\n".join(lines[:20])
+    joined = "\n".join(lines[:40])
 
     patterns = [
         r"(Proceedings of [^\n]+)",
         r"(In Proceedings of [^\n]+)",
-        r"(NeurIPS\s+\d{4})",
-        r"(ICML\s+\d{4})",
-        r"(ICLR\s+\d{4})",
-        r"(ACL\s+\d{4})",
-        r"(EMNLP\s+\d{4})",
-        r"(CVPR\s+\d{4})",
-        r"(ICCV\s+\d{4})",
-        r"(ECCV\s+\d{4})",
-        r"(AAAI\s+\d{4})",
-        r"(IJCAI\s+\d{4})",
-        r"(KDD\s+\d{4})",
-        r"(WWW\s+\d{4})",
+        r"(International Conference on [^\n]+)",
+        r"(Conference on [^\n]+)",
+        r"(Journal of [^\n]+)",
+        r"(Transactions on [^\n]+)",
+        r"(Frontiers in [A-Za-z ]+)",
+        r"(Nature [A-Za-z ]+|Science|Cell|The Lancet [A-Za-z ]+|IEEE Transactions on [A-Za-z ,\-]+)",
+        r"(Neural Information Processing Systems(?: \(NeurIPS\))?)",
+        r"(International Conference on Machine Learning(?: \(ICML\))?)",
+        r"(International Conference on Learning Representations(?: \(ICLR\))?)",
+        r"(Annual Meeting of the Association for Computational Linguistics(?: \(ACL\))?)",
+        r"(Conference on Empirical Methods in Natural Language Processing(?: \(EMNLP\))?)",
+        r"(Conference on Computer Vision and Pattern Recognition(?: \(CVPR\))?)",
+        r"(International Conference on Computer Vision(?: \(ICCV\))?)",
+        r"(European Conference on Computer Vision(?: \(ECCV\))?)",
+        r"(AAAI(?: Conference on Artificial Intelligence)?)",
+        r"(International Joint Conference on Artificial Intelligence(?: \(IJCAI\))?)",
+        r"(ACM SIGKDD[^\n]*)",
+        r"(The Web Conference(?: \(WWW\))?)",
+        r"(NeurIPS(?:\s+\d{4})?)",
+        r"(ICML(?:\s+\d{4})?)",
+        r"(ICLR(?:\s+\d{4})?)",
+        r"(ACL(?:\s+\d{4})?)",
+        r"(EMNLP(?:\s+\d{4})?)",
+        r"(CVPR(?:\s+\d{4})?)",
+        r"(ICCV(?:\s+\d{4})?)",
+        r"(ECCV(?:\s+\d{4})?)",
+        r"(AAAI(?:\s+\d{4})?)",
+        r"(IJCAI(?:\s+\d{4})?)",
+        r"(KDD(?:\s+\d{4})?)",
+        r"(WWW(?:\s+\d{4})?)",
     ]
 
     for pattern in patterns:
         m = re.search(pattern, joined, flags=re.IGNORECASE)
         if m:
-            return m.group(1).strip()
+            venue = re.sub(r"\s+", " ", m.group(1)).strip(" .,;:")
+            return venue
 
     return ""
 
@@ -515,6 +985,16 @@ def infer_doi(text: str) -> str:
     if not m:
         return ""
     return m.group(1).rstrip(".,);]")
+
+
+def normalize_doi(doi: str) -> str:
+    if not doi:
+        return ""
+
+    text = doi.strip()
+    text = re.sub(r"^https?://(dx\.)?doi\.org/", "", text, flags=re.IGNORECASE)
+    text = text.strip().rstrip(".,);]")
+    return text.lower()
 
 
 def build_snippet(text: str, max_length: int = 500) -> str:
@@ -529,9 +1009,11 @@ def build_snippet(text: str, max_length: int = 500) -> str:
 def extract_paper_metadata(pdf_path: Path) -> dict[str, str]:
     """
     파일명 + PDF 첫 페이지 텍스트 + PDF 메타데이터를 조합해 메타를 추출한다.
+    Crossref 비의존 fallback용 전역 함수.
     """
     name = pdf_path.stem
-    first_page_text = extract_pdf_first_page_text(pdf_path)
+    raw_first_page_text = extract_pdf_first_page_text(pdf_path)
+    first_page_text = clean_front_matter(raw_first_page_text)
     pdf_info = extract_pdf_document_info(pdf_path)
 
     filename_year_candidates = extract_year_candidates(name)
@@ -543,9 +1025,28 @@ def extract_paper_metadata(pdf_path: Path) -> dict[str, str]:
     )
 
     title = infer_title(name, first_page_text, pdf_info)
-    first_author = infer_first_author(first_page_text) or pdf_info.get("author", "").strip()
+    doi = normalize_doi(infer_doi(first_page_text))
+
+    author_block = infer_author_block(first_page_text, known_title=title)
+    authors = parse_authors(author_block)
+    if not authors:
+        authors = parse_authors(pdf_info.get("author", "").strip())
+
+    if authors and title:
+        t = title.casefold().strip()
+        a0 = authors[0].casefold().strip()
+        if t == a0 or t in a0 or a0 in t:
+            authors = []
+
+    if not authors:
+        lines = [line.strip() for line in first_page_text.splitlines() if line.strip()]
+        if title in lines:
+            idx = lines.index(title)
+            retry_block = " ".join(lines[idx + 1: idx + 4])
+            authors = parse_authors(retry_block)
+
+    first_author = authors[0] if authors else ""
     venue = infer_venue(first_page_text)
-    doi = infer_doi(first_page_text)
     snippet = build_snippet(first_page_text)
 
     field_source = " ".join(
@@ -561,21 +1062,49 @@ def extract_paper_metadata(pdf_path: Path) -> dict[str, str]:
     )
     field_code = infer_field_code_from_text(field_source)
 
+    doc_type, doc_score, doc_reasons = classify_document_type(
+        first_page_text=first_page_text,
+        pdf_info=pdf_info,
+        title=title,
+        venue=venue,
+        doi=doi,
+    )
+
+    if doc_type != "academic":
+        field_code = "ETC"
+        if not doi:
+            venue = ""
+        if not authors:
+            first_author = ""
+        if doc_type == "non_academic":
+            year = "UnknownYear"
+
     return {
         "field_code": field_code,
         "year": year,
         "first_author": first_author,
+        "authors_json": json.dumps(authors, ensure_ascii=False),
         "venue": venue,
         "title": title,
         "doi": doi,
         "snippet": snippet,
+        "doc_type": doc_type,
+        "doc_score": f"{doc_score:.2f}",
+        "doc_reasons_json": json.dumps(doc_reasons, ensure_ascii=False),
     }
 
 
-def build_output_pdf_path(output_dir: Path, field_code: str, year: str, src_pdf: Path) -> Path:
+def build_output_pdf_path(
+    output_dir: Path,
+    doc_type: str,
+    field_code: str,
+    year: str,
+    src_pdf: Path,
+) -> Path:
+    safe_type = doc_type if doc_type in {"academic", "non_academic", "unknown"} else "unknown"
     safe_field = field_code.strip() or "ETC"
     safe_year = normalize_year(year)
-    return output_dir / safe_field / safe_year / src_pdf.name
+    return output_dir / safe_type / safe_field / safe_year / src_pdf.name
 
 
 class PaperOrganizer:
@@ -613,6 +1142,196 @@ class PaperOrganizer:
     def is_cancelled(self) -> bool:
         return self.cancel_event.is_set()
 
+    def fetch_crossref_record(self, doi: str) -> dict[str, object]:
+        norm_doi = normalize_doi(doi)
+        if not norm_doi:
+            return {}
+
+        cache_key = f"crossref:work:{norm_doi}"
+
+        cached = self.index.get_crossref_cache(
+            cache_key,
+            max_age_days=self.crossref_cache_days,
+        )
+        if cached:
+            try:
+                data = json.loads(cached)
+                if isinstance(data, dict):
+                    return data
+            except Exception:
+                pass
+
+        url = f"https://api.crossref.org/works/{norm_doi}"
+        headers = {
+            "User-Agent": f"AcademicPaperOrganizer/1.0 (mailto:{self.crossref_mailto})"
+        }
+
+        try:
+            resp = requests.get(url, headers=headers, timeout=8)
+            if resp.status_code != 200:
+                return {}
+
+            payload = resp.json()
+            message = payload.get("message", {})
+
+            authors_raw = message.get("author", [])
+            authors: list[str] = []
+            for author in authors_raw:
+                if not isinstance(author, dict):
+                    continue
+
+                given = str(author.get("given", "")).strip()
+                family = str(author.get("family", "")).strip()
+                literal = str(author.get("literal", "")).strip()
+
+                name = f"{given} {family}".strip() or literal
+                if name:
+                    authors.append(name)
+
+            deduped_authors: list[str] = []
+            seen: set[str] = set()
+            for name in authors:
+                key = name.casefold()
+                if key not in seen:
+                    seen.add(key)
+                    deduped_authors.append(name)
+
+            title_list = message.get("title", [])
+            container_list = message.get("container-title", [])
+            published = message.get("published-print") or message.get("published-online") or message.get("issued") or {}
+            date_parts = published.get("date-parts", [])
+            crossref_year = ""
+            if date_parts and isinstance(date_parts, list) and date_parts[0]:
+                try:
+                    crossref_year = normalize_year(date_parts[0][0])
+                except Exception:
+                    crossref_year = ""
+
+            record = {
+                "authors": deduped_authors,
+                "title": str(title_list[0]).strip() if isinstance(title_list, list) and title_list else "",
+                "venue": str(container_list[0]).strip() if isinstance(container_list, list) and container_list else "",
+                "year": crossref_year,
+            }
+
+            self.index.set_crossref_cache(
+                cache_key,
+                json.dumps(record, ensure_ascii=False),
+            )
+
+            time.sleep(0.2)
+            return record
+
+        except Exception:
+            return {}
+
+    def fetch_authors_from_crossref(self, doi: str) -> list[str]:
+        record = self.fetch_crossref_record(doi)
+        authors = record.get("authors", [])
+        if isinstance(authors, list):
+            return [str(x).strip() for x in authors if str(x).strip()]
+        return []
+
+    def extract_paper_metadata(self, pdf_path: Path) -> dict[str, str]:
+        """
+        파일명 + PDF 첫 페이지 텍스트 + PDF 메타데이터 + Crossref를 조합해 메타를 추출한다.
+        저자/제목/저널 정보 우선순위:
+        1) Crossref (DOI)
+        2) PDF metadata
+        3) 첫 페이지 텍스트 파싱
+        """
+        name = pdf_path.stem
+        raw_first_page_text = extract_pdf_first_page_text(pdf_path)
+        first_page_text = clean_front_matter(raw_first_page_text)
+        pdf_info = extract_pdf_document_info(pdf_path)
+
+        filename_year_candidates = extract_year_candidates(name)
+        first_page_year_candidates = extract_year_candidates(first_page_text)
+
+        doi = normalize_doi(infer_doi(first_page_text))
+        crossref_record = self.fetch_crossref_record(doi)
+
+        title = str(crossref_record.get("title", "")).strip() or infer_title(name, first_page_text, pdf_info)
+        venue = str(crossref_record.get("venue", "")).strip() or infer_venue(first_page_text)
+
+        year = choose_best_year(
+            crossref_record.get("year", ""),
+            *filename_year_candidates,
+            *first_page_year_candidates,
+        )
+
+        authors = crossref_record.get("authors", [])
+        if not isinstance(authors, list):
+            authors = []
+
+        if not authors:
+            author_block = infer_author_block(first_page_text, known_title=title)
+            authors = parse_authors(author_block)
+
+        if not authors:
+            authors = parse_authors(pdf_info.get("author", "").strip())
+
+        if authors and title:
+            t = title.casefold().strip()
+            a0 = authors[0].casefold().strip()
+            if t == a0 or t in a0 or a0 in t:
+                authors = []
+
+        if not authors:
+            lines = [line.strip() for line in first_page_text.splitlines() if line.strip()]
+            if title in lines:
+                idx = lines.index(title)
+                retry_block = " ".join(lines[idx + 1: idx + 4])
+                authors = parse_authors(retry_block)
+
+        first_author = authors[0] if authors else ""
+
+        snippet = build_snippet(first_page_text)
+
+        field_source = " ".join(
+            part for part in [
+                name,
+                title,
+                first_page_text[:3000],
+                venue,
+                pdf_info.get("subject", ""),
+                pdf_info.get("keywords", ""),
+            ]
+            if part
+        )
+        field_code = infer_field_code_from_text(field_source)
+
+        doc_type, doc_score, doc_reasons = classify_document_type(
+            first_page_text=first_page_text,
+            pdf_info=pdf_info,
+            title=title,
+            venue=venue,
+            doi=doi,
+        )
+
+        if doc_type != "academic":
+            field_code = "ETC"
+            if not doi:
+                venue = ""
+            if not authors:
+                first_author = ""
+            if doc_type == "non_academic":
+                year = "UnknownYear"
+
+        return {
+            "field_code": field_code,
+            "year": year,
+            "first_author": first_author,
+            "authors_json": json.dumps(authors, ensure_ascii=False),
+            "venue": venue,
+            "title": title,
+            "doi": doi,
+            "snippet": snippet,
+            "doc_type": doc_type,
+            "doc_score": f"{doc_score:.2f}",
+            "doc_reasons_json": json.dumps(doc_reasons, ensure_ascii=False),
+        }
+
     def process_pdf(self, pdf_path: Path) -> None:
         if self.is_cancelled():
             self.log("[CANCEL] PDF 처리 취소됨")
@@ -639,7 +1358,7 @@ class PaperOrganizer:
                 self.log(f"[CANCEL] 메타 추출 전 취소: {pdf_path}")
                 return
 
-            meta = extract_paper_metadata(pdf_path)
+            meta = self.extract_paper_metadata(pdf_path)
 
             if self.is_cancelled():
                 self.log(f"[CANCEL] 메타 추출 후 취소: {pdf_path}")
@@ -648,12 +1367,22 @@ class PaperOrganizer:
             field_code = meta.get("field_code", "").strip() or "ETC"
             year = normalize_year(meta.get("year", "").strip() or "UnknownYear")
             first_author = meta.get("first_author", "").strip()
+            authors_json = meta.get("authors_json", "[]").strip() or "[]"
             venue = meta.get("venue", "").strip()
             title = meta.get("title", "").strip() or pdf_path.stem
             doi = meta.get("doi", "").strip()
             snippet = meta.get("snippet", "").strip()
+            doc_type = meta.get("doc_type", "unknown").strip() or "unknown"
+            doc_score = meta.get("doc_score", "").strip()
+            doc_reasons_json = meta.get("doc_reasons_json", "[]").strip() or "[]"
 
-            dst_pdf = build_output_pdf_path(self.output_dir, field_code, year, pdf_path)
+            dst_pdf = build_output_pdf_path(
+                self.output_dir,
+                doc_type,
+                field_code,
+                year,
+                pdf_path,
+            )
 
             if self.is_cancelled():
                 self.log(f"[CANCEL] 복사 전 취소: {pdf_path}")
@@ -670,17 +1399,28 @@ class PaperOrganizer:
                 field_code=field_code,
                 year=year,
                 first_author=first_author,
+                authors_json=authors_json,
                 venue=venue,
                 title=title,
                 doi=doi,
                 path=str(stored_pdf),
                 original_path=str(pdf_path),
                 snippet=snippet,
+                doc_type=doc_type,
+                doc_score=doc_score,
+                doc_reasons_json=doc_reasons_json,
             )
 
             if self.is_cancelled():
                 self.log(f"[CANCEL] 인덱싱 후 취소: {pdf_path}")
                 return
+
+            try:
+                authors = json.loads(authors_json)
+                if not isinstance(authors, list):
+                    authors = []
+            except Exception:
+                authors = []
 
             write_pdf_sidecar_metadata(
                 stored_pdf.with_suffix(".json"),
@@ -691,9 +1431,14 @@ class PaperOrganizer:
                 field_code=field_code,
                 year=year,
                 author=first_author,
+                authors=authors,
                 venue=venue,
+                doc_type=doc_type,
+                doc_score=doc_score,
+                doc_reasons_json=doc_reasons_json,
             )
 
+            self.log(f"[CLASSIFY] {pdf_path.name} -> {doc_type} (score={doc_score})")
             self.log(f"[COPY] 원본 유지: {pdf_path}")
             self.log(f"[COPY] 정리본 저장: {stored_pdf}")
 
@@ -877,20 +1622,33 @@ def run_reindex(
                 field_code = str(data.get("field_code", "ETC")).strip() or "ETC"
                 year = normalize_year(data.get("year", "UnknownYear"))
                 first_author = str(data.get("author", ""))
+
+                authors = data.get("authors", [])
+                if not isinstance(authors, list):
+                    authors = []
+                authors_json = json.dumps(authors, ensure_ascii=False)
+
                 venue = str(data.get("venue", ""))
                 title = str(data.get("title", stored_pdf.stem))
                 doi = str(data.get("doi", ""))
+                doc_type = str(data.get("doc_type", "unknown")).strip() or "unknown"
+                doc_score = str(data.get("doc_score", "")).strip()
+                doc_reasons_json = str(data.get("doc_reasons_json", "[]")).strip() or "[]"
 
                 index.add_paper(
                     field_code=field_code,
                     year=year,
                     first_author=first_author,
+                    authors_json=authors_json,
                     venue=venue,
                     title=title,
                     doi=doi,
                     path=str(stored_pdf),
                     original_path=str(original_path),
                     snippet="",
+                    doc_type=doc_type,
+                    doc_score=doc_score,
+                    doc_reasons_json=doc_reasons_json,
                 )
                 restored += 1
             except Exception as exc:

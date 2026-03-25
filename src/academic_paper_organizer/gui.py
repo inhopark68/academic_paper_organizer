@@ -40,6 +40,7 @@ class AppConfig:
     year: str = ""
     field: str = ""
     venue: str = ""
+    doc_type: str = ""
     limit: str = "50"
 
     recursive: bool = True
@@ -64,6 +65,7 @@ class AppConfig:
                 year=str(data.get("year", "")).strip(),
                 field=str(data.get("field", "")).strip(),
                 venue=str(data.get("venue", "")).strip(),
+                doc_type=str(data.get("doc_type", "")).strip(),
                 limit=str(data.get("limit", "50")).strip() or "50",
                 recursive=bool(data.get("recursive", True)),
                 watch_mode=str(data.get("watch_mode", "all")).strip() or "all",
@@ -141,6 +143,7 @@ class FilteringEventHandler(FileSystemEventHandler):
 
 class OrganizerGUI:
     COLUMNS = (
+        "doc_type",
         "field",
         "year",
         "author",
@@ -167,6 +170,7 @@ class OrganizerGUI:
         self.year_var = tk.StringVar(value=self.app_config.year)
         self.field_var = tk.StringVar(value=self.app_config.field)
         self.venue_var = tk.StringVar(value=self.app_config.venue)
+        self.doc_type_var = tk.StringVar(value=self.app_config.doc_type)
         self.limit_var = tk.StringVar(value=self.app_config.limit)
 
         self.crossref_email_var = tk.StringVar(value=self.app_config.crossref_mailto)
@@ -984,14 +988,28 @@ class OrganizerGUI:
             pady=4,
         )
 
-        ttk.Label(filters, text="최대 건수").grid(
+        ttk.Label(filters, text="문서유형").grid(
             row=1, column=4, sticky="w", padx=(16, 6), pady=4
+        )
+        doc_type_combo = self._grid_combobox(
+            filters,
+            textvariable=self.doc_type_var,
+            values=["", "academic", "non_academic", "unknown"],
+            state="readonly",
+            row=1,
+            column=5,
+            sticky="ew",
+            pady=4,
+        )
+
+        ttk.Label(filters, text="최대 건수").grid(
+            row=2, column=4, sticky="w", padx=(16, 6), pady=4
         )
         limit_entry = self._grid_entry(
             filters,
             textvariable=self.limit_var,
             width=10,
-            row=1,
+            row=2,
             column=5,
             sticky="ew",
             pady=4,
@@ -1003,6 +1021,7 @@ class OrganizerGUI:
             year_entry,
             field_combo,
             venue_entry,
+            doc_type_combo,
             limit_entry,
         ]:
             entry.bind("<Return>", lambda event: self.search())
@@ -1121,6 +1140,7 @@ class OrganizerGUI:
         )
 
         self.base_headings = {
+            "doc_type": "문서유형",
             "field": "분야",
             "year": "연도",
             "author": "저자",
@@ -1131,6 +1151,7 @@ class OrganizerGUI:
             "original_path": "원본 경로",
         }
         widths = {
+            "doc_type": 90,
             "field": 70,
             "year": 70,
             "author": 110,
@@ -1236,6 +1257,7 @@ class OrganizerGUI:
             self.app_config.year = self.year_var.get().strip()
             self.app_config.field = self.field_var.get().strip()
             self.app_config.venue = self.venue_var.get().strip()
+            self.app_config.doc_type = self.doc_type_var.get().strip()
             self.app_config.limit = self.limit_var.get().strip() or "50"
             self.app_config.recursive = self.recursive_var.get()
             self.app_config.watch_mode = self.watch_mode_var.get().strip() or "all"
@@ -1692,6 +1714,7 @@ class OrganizerGUI:
         self.year_var.set("")
         self.field_var.set("")
         self.venue_var.set("")
+        self.doc_type_var.set("")
         self.limit_var.set("50")
         self._clear_results()
         self._set_text_widget(self.snippet_text, "")
@@ -1724,6 +1747,7 @@ class OrganizerGUI:
                 year=self.year_var.get().strip() or None,
                 field_code=self.field_var.get().strip() or None,
                 venue=self.venue_var.get().strip() or None,
+                doc_type=self.doc_type_var.get().strip() or None,
                 limit=limit,
             )
         except Exception as exc:
@@ -1739,6 +1763,7 @@ class OrganizerGUI:
                 "",
                 "end",
                 values=(
+                    getattr(row, "doc_type", "unknown"),
                     row.field_code,
                     row.year,
                     row.first_author,
@@ -1782,13 +1807,13 @@ class OrganizerGUI:
         values = self._selected_values()
         if not values:
             return None
-        return Path(values[6])
+        return Path(values[7])
 
     def _selected_original_path(self) -> Path | None:
         values = self._selected_values()
         if not values:
             return None
-        original = str(values[7]).strip()
+        original = str(values[8]).strip()
         if not original:
             return None
         return Path(original)
@@ -1797,7 +1822,7 @@ class OrganizerGUI:
         values = self._selected_values()
         if not values:
             return None
-        doi = str(values[5]).strip()
+        doi = str(values[6]).strip()
         return doi or None
 
     def _selected_paths(self) -> list[Path]:
@@ -1809,7 +1834,7 @@ class OrganizerGUI:
             if not values:
                 continue
             try:
-                path = Path(values[6])
+                path = Path(values[7])
             except Exception:
                 continue
             if path.exists() and path.is_file():
@@ -1862,8 +1887,8 @@ class OrganizerGUI:
         if not src.exists() or not src.is_file():
             return None, None
 
-        field_code = str(values[0]).strip() or "ETC"
-        year = str(values[1]).strip() or "UnknownYear"
+        field_code = str(values[1]).strip() or "ETC"
+        year = str(values[2]).strip() or "UnknownYear"
         arcname = str(Path(field_code) / year / src.name).replace("\\", "/")
         return src, arcname
 
@@ -1967,6 +1992,7 @@ class OrganizerGUI:
         output_file = Path(csv_path).expanduser().resolve()
 
         header = [
+            "doc_type",
             "field",
             "year",
             "author",
@@ -1994,6 +2020,7 @@ class OrganizerGUI:
                     str(values[5]) if len(values) > 5 else "",
                     str(values[6]) if len(values) > 6 else "",
                     str(values[7]) if len(values) > 7 else "",
+                    str(values[8]) if len(values) > 8 else "",
                 ]
             )
 
