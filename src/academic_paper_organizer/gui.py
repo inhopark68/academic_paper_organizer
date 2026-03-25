@@ -140,7 +140,16 @@ class FilteringEventHandler(FileSystemEventHandler):
 
 
 class OrganizerGUI:
-    COLUMNS = ("field", "year", "author", "venue", "title", "doi", "path", "original_path")
+    COLUMNS = (
+        "field",
+        "year",
+        "author",
+        "venue",
+        "title",
+        "doi",
+        "path",
+        "original_path",
+    )
 
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -161,13 +170,19 @@ class OrganizerGUI:
         self.limit_var = tk.StringVar(value=self.app_config.limit)
 
         self.crossref_email_var = tk.StringVar(value=self.app_config.crossref_mailto)
-        self.crossref_cache_days_var = tk.StringVar(value=str(self.app_config.crossref_cache_days))
+        self.crossref_cache_days_var = tk.StringVar(
+            value=str(self.app_config.crossref_cache_days)
+        )
 
         self.status_var = tk.StringVar(value="대기 중")
 
         self.recursive_var = tk.BooleanVar(value=self.app_config.recursive)
         self.watch_mode_var = tk.StringVar(
-            value=self.app_config.watch_mode if self.app_config.watch_mode in ("all", "selected") else "all"
+            value=(
+                self.app_config.watch_mode
+                if self.app_config.watch_mode in ("all", "selected")
+                else "all"
+            )
         )
         self.selected_subdirs: list[Path] = [
             Path(p) for p in (self.app_config.selected_subdirs or []) if str(p).strip()
@@ -186,6 +201,9 @@ class OrganizerGUI:
         self.sort_state: dict[str, bool] = {}
         self.current_sort_column: str | None = None
 
+        self.use_boxed_widgets = True
+
+        self._configure_styles()
         self._build_ui()
         self._update_gui_log_path()
         self._format_selected_subdirs_label()
@@ -197,6 +215,433 @@ class OrganizerGUI:
 
         self.append_log("[GUI] 애플리케이션 시작")
 
+    def _configure_styles(self) -> None:
+        style = ttk.Style()
+
+        if "clam" in style.theme_names():
+            style.theme_use("clam")
+
+        bg = "#F7F9FC"
+        panel = "#FFFFFF"
+        border = "#D9E2EC"
+        text = "#243447"
+        muted = "#7A869A"
+
+        self.root.configure(bg=bg)
+
+        style.configure("TFrame", background=bg)
+        style.configure("TLabel", background=bg, foreground=text)
+        style.configure(
+            "TLabelframe",
+            background=bg,
+            bordercolor=border,
+            relief="groove",
+            borderwidth=1,
+        )
+        style.configure(
+            "TLabelframe.Label",
+            background=bg,
+            foreground=text,
+            font=("맑은 고딕", 10, "bold"),
+        )
+        style.configure("TCheckbutton", background=bg, foreground=text)
+        style.configure("TRadiobutton", background=bg, foreground=text)
+
+        style.configure(
+            "TEntry",
+            padding=7,
+            relief="flat",
+            borderwidth=0,
+            fieldbackground=panel,
+            foreground=text,
+        )
+        style.configure(
+            "TCombobox",
+            padding=7,
+            fieldbackground=panel,
+            foreground=text,
+            borderwidth=0,
+            relief="flat",
+        )
+        style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", panel)],
+            foreground=[("readonly", text)],
+        )
+
+        style.configure(
+            "Treeview",
+            rowheight=28,
+            background=panel,
+            fieldbackground=panel,
+            foreground=text,
+            borderwidth=1,
+            relief="solid",
+        )
+        style.configure(
+            "Treeview.Heading",
+            relief="raised",
+            borderwidth=1,
+            padding=(8, 6),
+            font=("맑은 고딕", 9, "bold"),
+        )
+
+        style.configure(
+            "TNotebook",
+            background=bg,
+            borderwidth=0,
+        )
+        style.configure(
+            "TNotebook.Tab",
+            padding=(18, 8),
+            relief="raised",
+            borderwidth=1,
+            font=("맑은 고딕", 10, "bold"),
+        )
+        style.map(
+            "TNotebook.Tab",
+            expand=[("selected", (1, 1, 1, 0))],
+        )
+
+        common_button = dict(
+            padding=(14, 8),
+            relief="raised",
+            borderwidth=1,
+            focusthickness=0,
+            font=("맑은 고딕", 9, "bold"),
+        )
+
+        style.configure(
+            "Soft.TButton",
+            background="#F4F6F8",
+            foreground=text,
+            **common_button,
+        )
+        style.map(
+            "Soft.TButton",
+            relief=[("pressed", "sunken"), ("active", "raised")],
+            background=[
+                ("active", "#E9EEF3"),
+                ("pressed", "#DDE5EC"),
+                ("disabled", "#F5F7F9"),
+            ],
+            foreground=[("disabled", muted)],
+        )
+
+        style.configure(
+            "Blue.TButton",
+            background="#EAF3FF",
+            foreground="#23405F",
+            **common_button,
+        )
+        style.map(
+            "Blue.TButton",
+            relief=[("pressed", "sunken"), ("active", "raised")],
+            background=[
+                ("active", "#DCEBFF"),
+                ("pressed", "#C9DCF8"),
+                ("disabled", "#F3F6FA"),
+            ],
+            foreground=[("disabled", muted)],
+        )
+
+        style.configure(
+            "Green.TButton",
+            background="#EAF8EE",
+            foreground="#234B2C",
+            **common_button,
+        )
+        style.map(
+            "Green.TButton",
+            relief=[("pressed", "sunken"), ("active", "raised")],
+            background=[
+                ("active", "#DCF2E3"),
+                ("pressed", "#C8E4D1"),
+                ("disabled", "#F3F7F4"),
+            ],
+            foreground=[("disabled", muted)],
+        )
+
+        style.configure(
+            "Orange.TButton",
+            background="#FFF4E8",
+            foreground="#6B4A2B",
+            **common_button,
+        )
+        style.map(
+            "Orange.TButton",
+            relief=[("pressed", "sunken"), ("active", "raised")],
+            background=[
+                ("active", "#FFEAD6"),
+                ("pressed", "#F6D8B7"),
+                ("disabled", "#FAF6F2"),
+            ],
+            foreground=[("disabled", muted)],
+        )
+
+        style.configure(
+            "Red.TButton",
+            background="#FDEEEF",
+            foreground="#7A3940",
+            **common_button,
+        )
+        style.map(
+            "Red.TButton",
+            relief=[("pressed", "sunken"), ("active", "raised")],
+            background=[
+                ("active", "#F9E0E2"),
+                ("pressed", "#EECACE"),
+                ("disabled", "#FAF4F4"),
+            ],
+            foreground=[("disabled", muted)],
+        )
+
+    def _make_box(
+        self,
+        parent,
+        *,
+        border_color: str = "#D9E2EC",
+        bd: int = 1,
+        relief: str = "raised",
+    ) -> tk.Frame:
+        return tk.Frame(
+            parent,
+            bg=border_color,
+            bd=bd,
+            relief=relief,
+            highlightthickness=0,
+        )
+
+    def _create_button(
+        self,
+        parent,
+        *,
+        text: str,
+        command,
+        style_name: str | None = None,
+        width: int = 14,
+    ):
+        kwargs = {
+            "text": text,
+            "command": command,
+            "width": width,
+        }
+        if style_name:
+            kwargs["style"] = style_name
+        return ttk.Button(parent, **kwargs)
+
+    def _create_entry(
+        self,
+        parent,
+        *,
+        textvariable,
+        width: int | None = None,
+    ):
+        kwargs = {"textvariable": textvariable}
+        if width is not None:
+            kwargs["width"] = width
+        return ttk.Entry(parent, **kwargs)
+
+    def _create_combobox(
+        self,
+        parent,
+        *,
+        textvariable,
+        values,
+        state: str = "readonly",
+    ):
+        return ttk.Combobox(
+            parent,
+            textvariable=textvariable,
+            values=values,
+            state=state,
+        )
+
+    def _grid_button(
+        self,
+        parent,
+        *,
+        text: str,
+        command,
+        row: int,
+        column: int,
+        style_name: str | None = None,
+        width: int = 14,
+        rowspan: int = 1,
+        columnspan: int = 1,
+        sticky: str = "",
+        padx=0,
+        pady=0,
+    ):
+        if self.use_boxed_widgets:
+            box = self._make_box(parent, relief="raised")
+            btn = self._create_button(
+                box,
+                text=text,
+                command=command,
+                style_name=style_name,
+                width=width,
+            )
+            btn.pack(fill="both", expand=True, padx=2, pady=2)
+            box.grid(
+                row=row,
+                column=column,
+                rowspan=rowspan,
+                columnspan=columnspan,
+                sticky=sticky,
+                padx=padx,
+                pady=pady,
+            )
+            return btn
+
+        btn = self._create_button(
+            parent,
+            text=text,
+            command=command,
+            style_name=style_name,
+            width=width,
+        )
+        btn.grid(
+            row=row,
+            column=column,
+            rowspan=rowspan,
+            columnspan=columnspan,
+            sticky=sticky,
+            padx=padx,
+            pady=pady,
+        )
+        return btn
+
+    def _grid_entry(
+        self,
+        parent,
+        *,
+        textvariable,
+        row: int,
+        column: int,
+        width: int | None = None,
+        rowspan: int = 1,
+        columnspan: int = 1,
+        sticky: str = "",
+        padx=0,
+        pady=0,
+    ):
+        if self.use_boxed_widgets:
+            box = self._make_box(parent, relief="sunken")
+            box.columnconfigure(0, weight=1)
+            entry = self._create_entry(box, textvariable=textvariable, width=width)
+            entry.grid(row=0, column=0, sticky="ew", padx=2, pady=2)
+            box.grid(
+                row=row,
+                column=column,
+                rowspan=rowspan,
+                columnspan=columnspan,
+                sticky=sticky,
+                padx=padx,
+                pady=pady,
+            )
+            return entry
+
+        entry = self._create_entry(parent, textvariable=textvariable, width=width)
+        entry.grid(
+            row=row,
+            column=column,
+            rowspan=rowspan,
+            columnspan=columnspan,
+            sticky=sticky,
+            padx=padx,
+            pady=pady,
+        )
+        return entry
+
+    def _grid_combobox(
+        self,
+        parent,
+        *,
+        textvariable,
+        values,
+        row: int,
+        column: int,
+        state: str = "readonly",
+        rowspan: int = 1,
+        columnspan: int = 1,
+        sticky: str = "",
+        padx=0,
+        pady=0,
+    ):
+        if self.use_boxed_widgets:
+            box = self._make_box(parent, relief="sunken")
+            box.columnconfigure(0, weight=1)
+            combo = self._create_combobox(
+                box,
+                textvariable=textvariable,
+                values=values,
+                state=state,
+            )
+            combo.grid(row=0, column=0, sticky="ew", padx=2, pady=2)
+            box.grid(
+                row=row,
+                column=column,
+                rowspan=rowspan,
+                columnspan=columnspan,
+                sticky=sticky,
+                padx=padx,
+                pady=pady,
+            )
+            return combo
+
+        combo = self._create_combobox(
+            parent,
+            textvariable=textvariable,
+            values=values,
+            state=state,
+        )
+        combo.grid(
+            row=row,
+            column=column,
+            rowspan=rowspan,
+            columnspan=columnspan,
+            sticky=sticky,
+            padx=padx,
+            pady=pady,
+        )
+        return combo
+
+    def _pack_button(
+        self,
+        parent,
+        *,
+        text: str,
+        command,
+        style_name: str | None = None,
+        width: int = 14,
+        side="left",
+        padx=0,
+        pady=0,
+    ):
+        if self.use_boxed_widgets:
+            box = self._make_box(parent, relief="raised")
+            btn = self._create_button(
+                box,
+                text=text,
+                command=command,
+                style_name=style_name,
+                width=width,
+            )
+            btn.pack(fill="both", expand=True, padx=2, pady=2)
+            box.pack(side=side, padx=padx, pady=pady)
+            return btn
+
+        btn = self._create_button(
+            parent,
+            text=text,
+            command=command,
+            style_name=style_name,
+            width=width,
+        )
+        btn.pack(side=side, padx=padx, pady=pady)
+        return btn
+
     def _build_ui(self) -> None:
         outer = ttk.Frame(self.root, padding=10)
         outer.pack(fill="both", expand=True)
@@ -206,46 +651,214 @@ class OrganizerGUI:
         top.columnconfigure(1, weight=1)
         top.columnconfigure(4, weight=1)
 
-        ttk.Label(top, text="감시 폴더").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Entry(top, textvariable=self.watch_var).grid(row=0, column=1, sticky="ew", pady=4)
-        ttk.Button(top, text="찾아보기", command=self.pick_watch_dir).grid(row=0, column=2, padx=6, pady=4)
+        ttk.Label(top, text="감시 폴더").grid(
+            row=0, column=0, sticky="w", padx=(0, 8), pady=4
+        )
+        self._grid_entry(
+            top,
+            textvariable=self.watch_var,
+            row=0,
+            column=1,
+            sticky="ew",
+            pady=4,
+        )
+        self._grid_button(
+            top,
+            text="찾아보기",
+            command=self.pick_watch_dir,
+            style_name="Soft.TButton",
+            width=10,
+            row=0,
+            column=2,
+            padx=6,
+            pady=4,
+        )
 
-        ttk.Label(top, text="출력 폴더").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Entry(top, textvariable=self.output_var).grid(row=1, column=1, sticky="ew", pady=4)
-        ttk.Button(top, text="찾아보기", command=self.pick_output_dir).grid(row=1, column=2, padx=6, pady=4)
+        ttk.Label(top, text="출력 폴더").grid(
+            row=1, column=0, sticky="w", padx=(0, 8), pady=4
+        )
+        self._grid_entry(
+            top,
+            textvariable=self.output_var,
+            row=1,
+            column=1,
+            sticky="ew",
+            pady=4,
+        )
+        self._grid_button(
+            top,
+            text="찾아보기",
+            command=self.pick_output_dir,
+            style_name="Soft.TButton",
+            width=10,
+            row=1,
+            column=2,
+            padx=6,
+            pady=4,
+        )
 
-        ttk.Label(top, text="Crossref 이메일").grid(row=0, column=3, sticky="w", padx=(16, 8), pady=4)
-        ttk.Entry(top, textvariable=self.crossref_email_var).grid(row=0, column=4, sticky="ew", pady=4)
+        ttk.Label(top, text="Crossref 이메일").grid(
+            row=0, column=3, sticky="w", padx=(16, 8), pady=4
+        )
+        self._grid_entry(
+            top,
+            textvariable=self.crossref_email_var,
+            row=0,
+            column=4,
+            sticky="ew",
+            pady=4,
+        )
 
-        ttk.Label(top, text="캐시 보관일").grid(row=1, column=3, sticky="w", padx=(16, 8), pady=4)
-        ttk.Entry(top, textvariable=self.crossref_cache_days_var, width=12).grid(row=1, column=4, sticky="w", pady=4)
+        ttk.Label(top, text="캐시 보관일").grid(
+            row=1, column=3, sticky="w", padx=(16, 8), pady=4
+        )
+        self._grid_entry(
+            top,
+            textvariable=self.crossref_cache_days_var,
+            width=12,
+            row=1,
+            column=4,
+            sticky="w",
+            pady=4,
+        )
 
-        ttk.Button(top, text="설정 저장", command=self.save_settings).grid(row=0, column=5, rowspan=2, padx=6, pady=4, sticky="ns")
+        self._grid_button(
+            top,
+            text="설정 저장",
+            command=self.save_settings,
+            style_name="Green.TButton",
+            width=12,
+            row=0,
+            column=5,
+            rowspan=2,
+            padx=6,
+            pady=4,
+            sticky="ns",
+        )
 
         controls = ttk.Frame(top)
         controls.grid(row=2, column=0, columnspan=6, sticky="ew", pady=(10, 0))
-        for i in range(12):
-            controls.columnconfigure(i, weight=1)
 
-        self.run_once_btn = ttk.Button(controls, text="1회 처리", command=self.run_once)
-        self.run_once_btn.grid(row=0, column=0, sticky="ew", padx=4, pady=4)
+        for i in range(8):
+            controls.columnconfigure(i, weight=0)
+        controls.columnconfigure(8, weight=1)
 
-        self.start_watch_btn = ttk.Button(controls, text="감시 시작", command=self.start_watch)
-        self.start_watch_btn.grid(row=0, column=1, sticky="ew", padx=4, pady=4)
+        self.run_once_btn = self._grid_button(
+            controls,
+            text="1회 처리",
+            command=self.run_once,
+            style_name="Blue.TButton",
+            width=12,
+            row=0,
+            column=0,
+            sticky="w",
+            padx=4,
+            pady=4,
+        )
 
-        self.stop_watch_btn = ttk.Button(controls, text="감시 중지", command=self.stop_watch)
-        self.stop_watch_btn.grid(row=0, column=2, sticky="ew", padx=4, pady=4)
+        self.start_watch_btn = self._grid_button(
+            controls,
+            text="감시 시작",
+            command=self.start_watch,
+            style_name="Green.TButton",
+            width=12,
+            row=0,
+            column=1,
+            sticky="w",
+            padx=4,
+            pady=4,
+        )
 
-        self.cancel_btn = ttk.Button(controls, text="작업 취소", command=self.cancel_current_task)
-        self.cancel_btn.grid(row=0, column=3, sticky="ew", padx=4, pady=4)
+        self.stop_watch_btn = self._grid_button(
+            controls,
+            text="감시 중지",
+            command=self.stop_watch,
+            style_name="Orange.TButton",
+            width=12,
+            row=0,
+            column=2,
+            sticky="w",
+            padx=4,
+            pady=4,
+        )
 
-        self.reindex_btn = ttk.Button(controls, text="연도보정+재인덱싱", command=self.reindex)
-        self.reindex_btn.grid(row=0, column=4, sticky="ew", padx=4, pady=4)
+        self.cancel_btn = self._grid_button(
+            controls,
+            text="작업 취소",
+            command=self.cancel_current_task,
+            style_name="Red.TButton",
+            width=12,
+            row=0,
+            column=3,
+            sticky="w",
+            padx=4,
+            pady=4,
+        )
 
-        ttk.Button(controls, text="캐시 삭제", command=self.clear_crossref_cache).grid(row=0, column=5, sticky="ew", padx=4, pady=4)
-        ttk.Button(controls, text="DB 폴더 열기", command=self.open_db_folder).grid(row=0, column=6, sticky="ew", padx=4, pady=4)
-        ttk.Button(controls, text="출력 폴더 열기", command=self.open_output_folder).grid(row=0, column=7, sticky="ew", padx=4, pady=4)
-        ttk.Label(controls, textvariable=self.status_var, anchor="e").grid(row=0, column=8, columnspan=4, sticky="ew", padx=8, pady=4)
+        self.reindex_btn = self._grid_button(
+            controls,
+            text="연도보정+재인덱싱",
+            command=self.reindex,
+            style_name="Blue.TButton",
+            width=18,
+            row=0,
+            column=4,
+            sticky="w",
+            padx=4,
+            pady=4,
+        )
+
+        self._grid_button(
+            controls,
+            text="캐시 삭제",
+            command=self.clear_crossref_cache,
+            style_name="Orange.TButton",
+            width=12,
+            row=0,
+            column=5,
+            sticky="w",
+            padx=4,
+            pady=4,
+        )
+
+        self._grid_button(
+            controls,
+            text="DB 폴더 열기",
+            command=self.open_db_folder,
+            style_name="Soft.TButton",
+            width=12,
+            row=0,
+            column=6,
+            sticky="w",
+            padx=4,
+            pady=4,
+        )
+
+        self._grid_button(
+            controls,
+            text="출력 폴더 열기",
+            command=self.open_output_folder,
+            style_name="Soft.TButton",
+            width=14,
+            row=0,
+            column=7,
+            sticky="w",
+            padx=4,
+            pady=4,
+        )
+
+        ttk.Label(
+            controls,
+            textvariable=self.status_var,
+            anchor="w",
+        ).grid(
+            row=1,
+            column=0,
+            columnspan=9,
+            sticky="ew",
+            padx=4,
+            pady=(8, 2),
+        )
 
         options_frame = ttk.Frame(top)
         options_frame.grid(row=3, column=0, columnspan=6, sticky="ew", pady=(8, 0))
@@ -274,14 +887,22 @@ class OrganizerGUI:
             command=self._on_watch_option_changed,
         ).grid(row=0, column=2, sticky="w", padx=(0, 8))
 
-        self.select_subdirs_btn = ttk.Button(
+        self.select_subdirs_btn = self._grid_button(
             options_frame,
             text="하위 폴더 선택",
             command=self.pick_subdirs,
+            style_name="Soft.TButton",
+            width=14,
+            row=0,
+            column=3,
+            sticky="w",
+            padx=(8, 8),
+            pady=0,
         )
-        self.select_subdirs_btn.grid(row=0, column=3, sticky="w", padx=(8, 8))
 
-        ttk.Label(options_frame, textvariable=self.selected_subdirs_label_var).grid(row=0, column=4, sticky="ew")
+        ttk.Label(options_frame, textvariable=self.selected_subdirs_label_var).grid(
+            row=0, column=4, sticky="ew"
+        )
 
         notebook = ttk.Notebook(outer)
         notebook.pack(fill="both", expand=True, pady=(10, 0))
@@ -300,52 +921,193 @@ class OrganizerGUI:
         for i in range(6):
             filters.columnconfigure(i, weight=1 if i in (1, 3, 5) else 0)
 
-        ttk.Label(filters, text="키워드").grid(row=0, column=0, sticky="w", padx=(0, 6), pady=4)
-        keyword_entry = ttk.Entry(filters, textvariable=self.keyword_var)
-        keyword_entry.grid(row=0, column=1, sticky="ew", pady=4)
+        ttk.Label(filters, text="키워드").grid(
+            row=0, column=0, sticky="w", padx=(0, 6), pady=4
+        )
+        keyword_entry = self._grid_entry(
+            filters,
+            textvariable=self.keyword_var,
+            row=0,
+            column=1,
+            sticky="ew",
+            pady=4,
+        )
 
-        ttk.Label(filters, text="저자").grid(row=0, column=2, sticky="w", padx=(16, 6), pady=4)
-        author_entry = ttk.Entry(filters, textvariable=self.author_var)
-        author_entry.grid(row=0, column=3, sticky="ew", pady=4)
+        ttk.Label(filters, text="저자").grid(
+            row=0, column=2, sticky="w", padx=(16, 6), pady=4
+        )
+        author_entry = self._grid_entry(
+            filters,
+            textvariable=self.author_var,
+            row=0,
+            column=3,
+            sticky="ew",
+            pady=4,
+        )
 
-        ttk.Label(filters, text="연도").grid(row=0, column=4, sticky="w", padx=(16, 6), pady=4)
-        year_entry = ttk.Entry(filters, textvariable=self.year_var, width=10)
-        year_entry.grid(row=0, column=5, sticky="ew", pady=4)
+        ttk.Label(filters, text="연도").grid(
+            row=0, column=4, sticky="w", padx=(16, 6), pady=4
+        )
+        year_entry = self._grid_entry(
+            filters,
+            textvariable=self.year_var,
+            width=10,
+            row=0,
+            column=5,
+            sticky="ew",
+            pady=4,
+        )
 
-        ttk.Label(filters, text="분야").grid(row=1, column=0, sticky="w", padx=(0, 6), pady=4)
-        field_values = [""] + list(FIELD_CODES.keys())
-        field_combo = ttk.Combobox(
+        ttk.Label(filters, text="분야").grid(
+            row=1, column=0, sticky="w", padx=(0, 6), pady=4
+        )
+        field_combo = self._grid_combobox(
             filters,
             textvariable=self.field_var,
-            values=field_values,
+            values=[""] + list(FIELD_CODES.keys()),
             state="readonly",
+            row=1,
+            column=1,
+            sticky="ew",
+            pady=4,
         )
-        field_combo.grid(row=1, column=1, sticky="ew", pady=4)
 
-        ttk.Label(filters, text="저널/학회").grid(row=1, column=2, sticky="w", padx=(16, 6), pady=4)
-        venue_entry = ttk.Entry(filters, textvariable=self.venue_var)
-        venue_entry.grid(row=1, column=3, sticky="ew", pady=4)
+        ttk.Label(filters, text="저널/학회").grid(
+            row=1, column=2, sticky="w", padx=(16, 6), pady=4
+        )
+        venue_entry = self._grid_entry(
+            filters,
+            textvariable=self.venue_var,
+            row=1,
+            column=3,
+            sticky="ew",
+            pady=4,
+        )
 
-        ttk.Label(filters, text="최대 건수").grid(row=1, column=4, sticky="w", padx=(16, 6), pady=4)
-        limit_entry = ttk.Entry(filters, textvariable=self.limit_var, width=10)
-        limit_entry.grid(row=1, column=5, sticky="ew", pady=4)
+        ttk.Label(filters, text="최대 건수").grid(
+            row=1, column=4, sticky="w", padx=(16, 6), pady=4
+        )
+        limit_entry = self._grid_entry(
+            filters,
+            textvariable=self.limit_var,
+            width=10,
+            row=1,
+            column=5,
+            sticky="ew",
+            pady=4,
+        )
 
-        for entry in [keyword_entry, author_entry, year_entry, field_combo, venue_entry, limit_entry]:
+        for entry in [
+            keyword_entry,
+            author_entry,
+            year_entry,
+            field_combo,
+            venue_entry,
+            limit_entry,
+        ]:
             entry.bind("<Return>", lambda event: self.search())
 
         action_row = ttk.Frame(parent)
         action_row.pack(fill="x", pady=(8, 8))
-        ttk.Button(action_row, text="검색", command=self.search).pack(side="left")
-        ttk.Button(action_row, text="필터 초기화", command=self.clear_filters).pack(side="left", padx=6)
-        ttk.Button(action_row, text="정리본 파일 열기", command=self.open_selected_file).pack(side="left", padx=(24, 6))
-        ttk.Button(action_row, text="정리본 폴더 열기", command=self.open_selected_folder).pack(side="left", padx=6)
-        ttk.Button(action_row, text="원본 파일 열기", command=self.open_selected_original_file).pack(side="left", padx=(24, 6))
-        ttk.Button(action_row, text="원본 폴더 열기", command=self.open_selected_original_folder).pack(side="left", padx=6)
-        ttk.Button(action_row, text="DOI 열기", command=self.open_selected_doi).pack(side="left", padx=6)
-        ttk.Button(action_row, text="선택 파일 모으기", command=self.collect_selected_files).pack(side="left", padx=(24, 6))
-        ttk.Button(action_row, text="선택 파일 ZIP", command=self.export_selected_zip).pack(side="left", padx=6)
-        ttk.Button(action_row, text="선택 목록 CSV 저장", command=self.export_selected_csv).pack(side="left", padx=6)
-        ttk.Button(action_row, text="검색 결과 전체 CSV 저장", command=self.export_all_results_csv).pack(side="left", padx=6)
+
+        self._pack_button(
+            action_row,
+            text="검색",
+            command=self.search,
+            style_name="Blue.TButton",
+            width=10,
+            side="left",
+        )
+        self._pack_button(
+            action_row,
+            text="필터 초기화",
+            command=self.clear_filters,
+            style_name="Soft.TButton",
+            width=12,
+            side="left",
+            padx=6,
+        )
+        self._pack_button(
+            action_row,
+            text="정리본 파일 열기",
+            command=self.open_selected_file,
+            style_name="Soft.TButton",
+            width=14,
+            side="left",
+            padx=(24, 6),
+        )
+        self._pack_button(
+            action_row,
+            text="정리본 폴더 열기",
+            command=self.open_selected_folder,
+            style_name="Soft.TButton",
+            width=14,
+            side="left",
+            padx=6,
+        )
+        self._pack_button(
+            action_row,
+            text="원본 파일 열기",
+            command=self.open_selected_original_file,
+            style_name="Soft.TButton",
+            width=14,
+            side="left",
+            padx=(24, 6),
+        )
+        self._pack_button(
+            action_row,
+            text="원본 폴더 열기",
+            command=self.open_selected_original_folder,
+            style_name="Soft.TButton",
+            width=14,
+            side="left",
+            padx=6,
+        )
+        self._pack_button(
+            action_row,
+            text="DOI 열기",
+            command=self.open_selected_doi,
+            style_name="Soft.TButton",
+            width=10,
+            side="left",
+            padx=6,
+        )
+        self._pack_button(
+            action_row,
+            text="선택 파일 모으기",
+            command=self.collect_selected_files,
+            style_name="Green.TButton",
+            width=14,
+            side="left",
+            padx=(24, 6),
+        )
+        self._pack_button(
+            action_row,
+            text="선택 파일 ZIP",
+            command=self.export_selected_zip,
+            style_name="Orange.TButton",
+            width=12,
+            side="left",
+            padx=6,
+        )
+        self._pack_button(
+            action_row,
+            text="선택 목록 CSV 저장",
+            command=self.export_selected_csv,
+            style_name="Soft.TButton",
+            width=15,
+            side="left",
+            padx=6,
+        )
+        self._pack_button(
+            action_row,
+            text="검색 결과 전체 CSV 저장",
+            command=self.export_all_results_csv,
+            style_name="Soft.TButton",
+            width=18,
+            side="left",
+            padx=6,
+        )
 
         tree_frame = ttk.Frame(parent)
         tree_frame.pack(fill="both", expand=True)
@@ -380,7 +1142,11 @@ class OrganizerGUI:
         }
 
         for col in self.COLUMNS:
-            self.tree.heading(col, text=self.base_headings[col], command=lambda c=col: self.sort_tree_by(c))
+            self.tree.heading(
+                col,
+                text=self.base_headings[col],
+                command=lambda c=col: self.sort_tree_by(c),
+            )
             self.tree.column(col, width=widths[col], anchor="w")
 
         self.tree.pack(side="left", fill="both", expand=True)
@@ -474,7 +1240,9 @@ class OrganizerGUI:
             self.app_config.recursive = self.recursive_var.get()
             self.app_config.watch_mode = self.watch_mode_var.get().strip() or "all"
             self.app_config.selected_subdirs = [str(p) for p in self.selected_subdirs]
-            self.app_config.crossref_mailto = self.crossref_email_var.get().strip() or "your-email@example.com"
+            self.app_config.crossref_mailto = (
+                self.crossref_email_var.get().strip() or "your-email@example.com"
+            )
             self.app_config.crossref_cache_days = cache_days
             self.app_config.save(self.config_path)
 
@@ -528,7 +1296,8 @@ class OrganizerGUI:
             output_dir=output_dir,
             log_fn=self.append_log,
             cancel_event=self.cancel_event,
-            crossref_mailto=self.crossref_email_var.get().strip() or "your-email@example.com",
+            crossref_mailto=self.crossref_email_var.get().strip()
+            or "your-email@example.com",
             crossref_cache_days=self._get_crossref_cache_days(),
         )
 
@@ -685,10 +1454,40 @@ class OrganizerGUI:
             self._format_selected_subdirs_label()
             dialog.destroy()
 
-        ttk.Button(btns, text="전체 선택", command=select_all).pack(side="left")
-        ttk.Button(btns, text="선택 해제", command=clear_all).pack(side="left", padx=6)
-        ttk.Button(btns, text="확인", command=confirm).pack(side="right")
-        ttk.Button(btns, text="취소", command=dialog.destroy).pack(side="right", padx=6)
+        self._pack_button(
+            btns,
+            text="전체 선택",
+            command=select_all,
+            style_name="Soft.TButton",
+            width=10,
+            side="left",
+        )
+        self._pack_button(
+            btns,
+            text="선택 해제",
+            command=clear_all,
+            style_name="Soft.TButton",
+            width=10,
+            side="left",
+            padx=6,
+        )
+        self._pack_button(
+            btns,
+            text="확인",
+            command=confirm,
+            style_name="Green.TButton",
+            width=8,
+            side="right",
+        )
+        self._pack_button(
+            btns,
+            text="취소",
+            command=dialog.destroy,
+            style_name="Red.TButton",
+            width=8,
+            side="right",
+            padx=6,
+        )
 
     def _get_effective_watch_roots(self, watch_dir: Path) -> list[Path]:
         if not self.recursive_var.get():
@@ -704,7 +1503,11 @@ class OrganizerGUI:
         watch_dir, output_dir = paths
 
         effective_roots = self._get_effective_watch_roots(watch_dir)
-        if self.recursive_var.get() and self.watch_mode_var.get() == "selected" and not effective_roots:
+        if (
+            self.recursive_var.get()
+            and self.watch_mode_var.get() == "selected"
+            and not effective_roots
+        ):
             messagebox.showinfo("안내", "처리할 하위 폴더를 먼저 선택해 주세요.")
             return
 
@@ -750,7 +1553,11 @@ class OrganizerGUI:
         watch_dir, output_dir = paths
 
         effective_roots = self._get_effective_watch_roots(watch_dir)
-        if self.recursive_var.get() and self.watch_mode_var.get() == "selected" and not effective_roots:
+        if (
+            self.recursive_var.get()
+            and self.watch_mode_var.get() == "selected"
+            and not effective_roots
+        ):
             messagebox.showinfo("안내", "감시할 하위 폴더를 먼저 선택해 주세요.")
             return
 
@@ -762,7 +1569,9 @@ class OrganizerGUI:
             handler = FilteringEventHandler(base_handler, effective_roots)
 
             self.observer = Observer()
-            self.observer.schedule(handler, str(watch_dir), recursive=self.recursive_var.get())
+            self.observer.schedule(
+                handler, str(watch_dir), recursive=self.recursive_var.get()
+            )
             self.observer.start()
 
             mode_text = "루트만"
@@ -844,7 +1653,9 @@ class OrganizerGUI:
             except Exception as exc:
                 self.append_log(f"[ERROR] 연도 폴더 보정/재인덱싱 실패: {exc}")
                 self.set_status("연도 폴더 보정/재인덱싱 실패")
-                self.show_error("오류", f"연도 폴더 보정/재인덱싱 중 오류가 발생했습니다:\n{exc}")
+                self.show_error(
+                    "오류", f"연도 폴더 보정/재인덱싱 중 오류가 발생했습니다:\n{exc}"
+                )
 
         self._run_in_thread(task, "연도 폴더 보정 + 재인덱싱 중")
 
@@ -940,7 +1751,7 @@ class OrganizerGUI:
             )
             self.snippets[item_id] = row.snippet or ""
 
-        self.status_var.set(f"검색 완료: {len(rows)}건")
+        self.status_var.set(f"[SEARCH] 검색 완료: {len(rows)}건")
         self.append_log(f"[SEARCH] 검색 완료: {len(rows)}건")
 
         if rows:
@@ -1059,7 +1870,9 @@ class OrganizerGUI:
     def collect_selected_files(self) -> None:
         paths = self._selected_paths()
         if not paths:
-            messagebox.showinfo("안내", "먼저 검색 결과에서 하나 이상의 파일을 선택해 주세요.")
+            messagebox.showinfo(
+                "안내", "먼저 검색 결과에서 하나 이상의 파일을 선택해 주세요."
+            )
             return
 
         target_dir = filedialog.askdirectory(title="파일을 모을 대상 폴더 선택")
@@ -1088,7 +1901,9 @@ class OrganizerGUI:
     def export_selected_zip(self) -> None:
         selected = self.tree.selection()
         if not selected:
-            messagebox.showinfo("안내", "먼저 검색 결과에서 하나 이상의 파일을 선택해 주세요.")
+            messagebox.showinfo(
+                "안내", "먼저 검색 결과에서 하나 이상의 파일을 선택해 주세요."
+            )
             return
 
         zip_path = filedialog.asksaveasfilename(
@@ -1123,9 +1938,14 @@ class OrganizerGUI:
                         failed += 1
                         self.append_log(f"[WARN] ZIP 추가 실패: {src} | {exc}")
 
-            self.append_log(f"[GUI] ZIP 생성 완료: {zip_file} | 성공 {added}건, 실패 {failed}건")
+            self.append_log(
+                f"[GUI] ZIP 생성 완료: {zip_file} | 성공 {added}건, 실패 {failed}건"
+            )
             self.set_status(f"ZIP 생성 완료: 성공 {added}건, 실패 {failed}건")
-            messagebox.showinfo("완료", f"ZIP 생성 완료\n성공: {added}건\n실패: {failed}건\n\n구조: 분야/연도/파일명.pdf")
+            messagebox.showinfo(
+                "완료",
+                f"ZIP 생성 완료\n성공: {added}건\n실패: {failed}건\n\n구조: 분야/연도/파일명.pdf",
+            )
         except Exception as exc:
             self.append_log(f"[ERROR] ZIP 생성 실패: {exc}")
             self.show_error("오류", f"ZIP 생성에 실패했습니다:\n{exc}")
@@ -1164,16 +1984,18 @@ class OrganizerGUI:
             if not values:
                 continue
 
-            rows.append([
-                str(values[0]) if len(values) > 0 else "",
-                str(values[1]) if len(values) > 1 else "",
-                str(values[2]) if len(values) > 2 else "",
-                str(values[3]) if len(values) > 3 else "",
-                str(values[4]) if len(values) > 4 else "",
-                str(values[5]) if len(values) > 5 else "",
-                str(values[6]) if len(values) > 6 else "",
-                str(values[7]) if len(values) > 7 else "",
-            ])
+            rows.append(
+                [
+                    str(values[0]) if len(values) > 0 else "",
+                    str(values[1]) if len(values) > 1 else "",
+                    str(values[2]) if len(values) > 2 else "",
+                    str(values[3]) if len(values) > 3 else "",
+                    str(values[4]) if len(values) > 4 else "",
+                    str(values[5]) if len(values) > 5 else "",
+                    str(values[6]) if len(values) > 6 else "",
+                    str(values[7]) if len(values) > 7 else "",
+                ]
+            )
 
         try:
             with output_file.open("w", newline="", encoding="utf-8-sig") as f:
@@ -1183,7 +2005,9 @@ class OrganizerGUI:
 
             self.append_log(f"[GUI] CSV 저장 완료: {output_file} | {len(rows)}건")
             self.set_status(f"CSV 저장 완료: {len(rows)}건")
-            messagebox.showinfo("완료", f"CSV 저장 완료\n파일: {output_file}\n건수: {len(rows)}")
+            messagebox.showinfo(
+                "완료", f"CSV 저장 완료\n파일: {output_file}\n건수: {len(rows)}"
+            )
         except Exception as exc:
             self.append_log(f"[ERROR] CSV 저장 실패: {exc}")
             self.show_error("오류", f"CSV 저장에 실패했습니다:\n{exc}")
@@ -1191,7 +2015,9 @@ class OrganizerGUI:
     def export_selected_csv(self) -> None:
         selected = list(self.tree.selection())
         if not selected:
-            messagebox.showinfo("안내", "먼저 검색 결과에서 하나 이상의 항목을 선택해 주세요.")
+            messagebox.showinfo(
+                "안내", "먼저 검색 결과에서 하나 이상의 항목을 선택해 주세요."
+            )
             return
 
         self._export_tree_items_to_csv(selected, "selected_papers.csv")
@@ -1317,7 +2143,10 @@ class OrganizerGUI:
             self.open_selected_file()
             return
 
-        if 0 <= column_index < len(self.COLUMNS) and self.COLUMNS[column_index] == "doi":
+        if (
+            0 <= column_index < len(self.COLUMNS)
+            and self.COLUMNS[column_index] == "doi"
+        ):
             self.open_selected_doi()
         else:
             self.open_selected_file()
@@ -1332,7 +2161,9 @@ class OrganizerGUI:
                 reverse = self.sort_state.get(col, False)
                 arrow = "▼" if reverse else "▲"
                 heading = f"{heading} {arrow}"
-            self.tree.heading(col, text=heading, command=lambda c=col: self.sort_tree_by(c))
+            self.tree.heading(
+                col, text=heading, command=lambda c=col: self.sort_tree_by(c)
+            )
 
     def sort_tree_by(self, column: str) -> None:
         items = list(self.tree.get_children())
@@ -1364,7 +2195,9 @@ class OrganizerGUI:
 
     def on_close(self) -> None:
         if self.worker_thread and self.worker_thread.is_alive():
-            if not messagebox.askyesno("종료 확인", "작업이 실행 중입니다. 그래도 종료하시겠습니까?"):
+            if not messagebox.askyesno(
+                "종료 확인", "작업이 실행 중입니다. 그래도 종료하시겠습니까?"
+            ):
                 return
 
         self.append_log("[GUI] 애플리케이션 종료")
