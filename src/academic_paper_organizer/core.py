@@ -1686,3 +1686,231 @@ def repair_and_reindex(
         cancel_event=cancel_event,
         crossref_cache_days=crossref_cache_days,
     )
+
+# ===== Fast reparse / incremental skip patch =====
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+
+def _file_signature(path: Path) -> dict[str, int]:
+    try:
+        st = path.stat()
+        return {
+            "source_size": int(st.st_size),
+            "source_mtime_ns": int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000))),
+        }
+    except Exception:
+        return {"source_size": -1, "source_mtime_ns": -1}
+
+
+def _safe_load_json(path: Path) -> dict[str, object]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _paperindex_init_fast(self, db_path: Path):
+    self.db_path = Path(db_path)
+    self.db_path.parent.mkdir(parents=True, exist_ok=True)
+    self.conn = sqlite3.connect(str(self.db_path), timeout=30, check_same_thread=False)
+    self.conn.row_factory = sqlite3.Row
+    try:
+        cur = self.conn.cursor()
+        cur.execute("PRAGMA journal_mode=WAL")
+        cur.execute("PRAGMA synchronous=NORMAL")
+        cur.execute("PRAGMA busy_timeout=30000")
+        self.conn.commit()
+    except Exception:
+        pass
+    self._init_db()
+
+
+def _paperindex_find_by_original_path(self, original_path: str) -> dict[str, str] | None:
+    cur = self.conn.cursor()
+    cur.execute(
+        """
+        SELECT path, original_path, title, doi, venue, year, field_code, doc_type
+        FROM papers
+        WHERE original_path = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (original_path,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+    return {
+        "path": row["path"] or "",
+        "original_path": row["original_path"] or "",
+        "title": row["title"] or "",
+        "doi": row["doi"] or "",
+        "venue": row["venue"] or "",
+        "year": row["year"] or "",
+        "field_code": row["field_code"] or "",
+        "doc_type": row["doc_type"] or "unknown",
+    }
+
+
+PaperIndex.__init__ = _paperindex_init_fast
+PaperIndex.find_by_original_path = _paperindex_find_by_original_path
+
+_old_process_pdf = PaperOrganizer.process_pdf
+
+
+def _organizer_clone(self) -> "PaperOrganizer":
+    return PaperOrganizer(
+        watch_dir=self.watch_dir,
+        output_dir=self.output_dir,
+        log_fn=self.log_fn,
+        cancel_event=self.cancel_event,
+        crossref_mailto=self.crossref_mailto,
+        crossref_cache_days=self.crossref_cache_days,
+    )
+
+
+def _organizer_should_skip_pdf(self, pdf_path: Path) -> bool:
+    pdf_path = Path(pdf_path).resolve()
+    row = self.index.find_by_original_path(str(pdf_path))
+    if not row:
+        return False
+
+    stored_pdf = Path(row.get("path", ""))
+    if not stored_pdf.exists():
+        return False
+
+    meta_path = stored_pdf.with_suffix(".json")
+    if not meta_path.exists():
+        return False
+
+    payload = _safe_load_json(meta_path)
+    current_sig = _file_signature(pdf_path)
+    old_size = int(payload.get("source_size", -2))
+    old_mtime = int(payload.get("source_mtime_ns", -2))
+
+    if old_size == current_sig["source_size"] and old_mtime == current_sig["source_mtime_ns"]:
+        return True
+    return False
+
+
+def _organizer_process_pdf_fast(self, pdf_path: Path, *, force_reparse: bool = False) -> None:
+    pdf_path = Path(pdf_path).resolve()
+
+    if not force_reparse and self.should_skip_pdf(pdf_path):
+        self.log(f"[SKIP] 변경 없음: {pdf_path}")
+        return
+
+    _old_process_pdf(self, pdf_path)
+
+    try:
+        row = self.index.find_by_original_path(str(pdf_path))
+        if not row:
+            return
+        stored_pdf = Path(row.get("path", ""))
+        if not stored_pdf.exists():
+            return
+        meta_path = stored_pdf.with_suffix(".json")
+        payload = _safe_load_json(meta_path)
+        payload.update(_file_signature(pdf_path))
+        payload["processed_at"] = datetime.now().isoformat(timespec="seconds")
+        meta_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        self.log(f"[WARN] 시그니처 저장 실패: {pdf_path} | {exc}")
+
+
+PaperOrganizer.clone = _organizer_clone
+PaperOrganizer.should_skip_pdf = _organizer_should_skip_pdf
+PaperOrganizer.process_pdf = _organizer_process_pdf_fast
+
+
+def _iter_pdf_paths(root_dir: Path) -> list[Path]:
+    return [p for p in Path(root_dir).resolve().rglob("*.pdf") if p.is_file()]
+
+
+def scan_existing_pdfs(
+    organizer: PaperOrganizer,
+    root_dir: Path,
+    log_fn: Callable[[str], None] | None = None,
+    *,
+    workers: int = 1,
+    skip_unchanged: bool = True,
+    force_reparse: bool = False,
+) -> None:
+    root_dir = Path(root_dir).resolve()
+    logger = log_fn or (lambda msg: None)
+
+    pdf_paths = _iter_pdf_paths(root_dir)
+    total = len(pdf_paths)
+    if total == 0:
+        logger("[SCAN] 처리할 PDF가 없습니다")
+        return
+
+    workers = max(1, int(workers or 1))
+    if workers == 1:
+        processed = 0
+        for idx, pdf_path in enumerate(pdf_paths, start=1):
+            if organizer.is_cancelled():
+                logger("[CANCEL] 기존 PDF 스캔 취소됨")
+                break
+            try:
+                organizer.process_pdf(pdf_path, force_reparse=force_reparse)
+                processed += 1
+                if idx % 25 == 0 or idx == total:
+                    logger(f"[SCAN] 진행: {idx}/{total}")
+            except Exception as exc:
+                logger(f"[ERROR] 기존 PDF 처리 실패: {pdf_path} | {exc}")
+        logger(f"[SCAN] 기존 PDF 처리 완료: {processed}건")
+        return
+
+    logger(f"[SCAN] 병렬 처리 시작: 총 {total}건 | workers={workers}")
+
+    def _task(pdf_path: Path) -> tuple[str, str]:
+        if organizer.is_cancelled():
+            return ("cancel", str(pdf_path))
+        local_org = organizer.clone()
+        try:
+            if skip_unchanged and not force_reparse and local_org.should_skip_pdf(pdf_path):
+                return ("skip", str(pdf_path))
+            local_org.process_pdf(pdf_path, force_reparse=force_reparse)
+            return ("ok", str(pdf_path))
+        finally:
+            try:
+                local_org.close()
+            except Exception:
+                pass
+
+    done = 0
+    ok_count = 0
+    skip_count = 0
+    err_count = 0
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = {ex.submit(_task, pdf): pdf for pdf in pdf_paths}
+        for fut in as_completed(futures):
+            done += 1
+            pdf = futures[fut]
+            try:
+                status, _ = fut.result()
+                if status == "ok":
+                    ok_count += 1
+                elif status == "skip":
+                    skip_count += 1
+                elif status == "cancel":
+                    pass
+            except Exception as exc:
+                err_count += 1
+                logger(f"[ERROR] 기존 PDF 처리 실패: {pdf} | {exc}")
+
+            if done % 25 == 0 or done == total:
+                logger(
+                    f"[SCAN] 진행: {done}/{total} | 처리={ok_count} | 건너뜀={skip_count} | 오류={err_count}"
+                )
+
+            if organizer.is_cancelled():
+                logger("[CANCEL] 기존 PDF 스캔 취소 요청 감지")
+                break
+
+    logger(
+        f"[SCAN] 기존 PDF 처리 완료: 총 {total}건 | 처리={ok_count} | 건너뜀={skip_count} | 오류={err_count}"
+    )

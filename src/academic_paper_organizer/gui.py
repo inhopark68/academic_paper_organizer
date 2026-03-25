@@ -180,6 +180,11 @@ class OrganizerGUI:
 
         self.status_var = tk.StringVar(value="대기 중")
 
+        self.result_count_var = tk.StringVar(value="검색 결과: 0건")
+        self.academic_count_var = tk.StringVar(value="학술 논문: 0건")
+        self.non_academic_count_var = tk.StringVar(value="비학술 문서: 0건")
+        self.unknown_count_var = tk.StringVar(value="미분류: 0건")
+
         self.recursive_var = tk.BooleanVar(value=self.app_config.recursive)
         self.watch_mode_var = tk.StringVar(
             value=(
@@ -812,6 +817,19 @@ class OrganizerGUI:
             pady=4,
         )
 
+        self.reparse_btn = self._grid_button(
+            controls,
+            text="전체 재파싱(빠름)",
+            command=self.reparse_all,
+            style_name="Green.TButton",
+            width=16,
+            row=0,
+            column=5,
+            sticky="w",
+            padx=4,
+            pady=4,
+        )
+
         self._grid_button(
             controls,
             text="캐시 삭제",
@@ -819,7 +837,7 @@ class OrganizerGUI:
             style_name="Orange.TButton",
             width=12,
             row=0,
-            column=5,
+            column=6,
             sticky="w",
             padx=4,
             pady=4,
@@ -832,7 +850,7 @@ class OrganizerGUI:
             style_name="Soft.TButton",
             width=12,
             row=0,
-            column=6,
+            column=7,
             sticky="w",
             padx=4,
             pady=4,
@@ -845,7 +863,7 @@ class OrganizerGUI:
             style_name="Soft.TButton",
             width=14,
             row=0,
-            column=7,
+            column=8,
             sticky="w",
             padx=4,
             pady=4,
@@ -1029,6 +1047,23 @@ class OrganizerGUI:
         action_row = ttk.Frame(parent)
         action_row.pack(fill="x", pady=(8, 8))
 
+        dashboard = ttk.LabelFrame(parent, text="검색 요약", padding=10)
+        dashboard.pack(fill="x", pady=(0, 8))
+
+        ttk.Label(dashboard, textvariable=self.result_count_var).grid(
+            row=0, column=0, sticky="w", padx=(0, 20)
+        )
+        ttk.Label(dashboard, textvariable=self.academic_count_var).grid(
+            row=0, column=1, sticky="w", padx=(0, 20)
+        )
+        ttk.Label(dashboard, textvariable=self.non_academic_count_var).grid(
+            row=0, column=2, sticky="w", padx=(0, 20)
+        )
+        ttk.Label(dashboard, textvariable=self.unknown_count_var).grid(
+            row=0, column=3, sticky="w"
+        )
+
+
         self._pack_button(
             action_row,
             text="검색",
@@ -1184,6 +1219,32 @@ class OrganizerGUI:
         self.snippet_text = tk.Text(snippet_box, height=8, wrap="word", state="disabled")
         self.snippet_text.pack(fill="both", expand=True)
 
+    def _reset_search_dashboard(self) -> None:
+        self.result_count_var.set("검색 결과: 0건")
+        self.academic_count_var.set("학술 논문: 0건")
+        self.non_academic_count_var.set("비학술 문서: 0건")
+        self.unknown_count_var.set("미분류: 0건")
+
+    def _update_search_dashboard(self, rows) -> None:
+        total = len(rows)
+        academic = 0
+        non_academic = 0
+        unknown = 0
+
+        for row in rows:
+            doc_type = getattr(row, "doc_type", "unknown") or "unknown"
+            if doc_type == "academic":
+                academic += 1
+            elif doc_type == "non_academic":
+                non_academic += 1
+            else:
+                unknown += 1
+
+        self.result_count_var.set(f"검색 결과: {total}건")
+        self.academic_count_var.set(f"학술 논문: {academic}건")
+        self.non_academic_count_var.set(f"비학술 문서: {non_academic}건")
+        self.unknown_count_var.set(f"미분류: {unknown}건")
+
     def _build_log_tab(self, parent: ttk.Frame) -> None:
         self.log_text = tk.Text(parent, wrap="word", state="disabled")
         self.log_text.pack(fill="both", expand=True)
@@ -1311,6 +1372,10 @@ class OrganizerGUI:
         except Exception:
             return 180
 
+    def _get_parallel_workers(self) -> int:
+        cpu = os.cpu_count() or 4
+        return max(2, min(8, cpu))
+
     def _create_organizer(self, watch_dir: Path, output_dir: Path) -> PaperOrganizer:
         self.cancel_event.clear()
         return PaperOrganizer(
@@ -1332,6 +1397,7 @@ class OrganizerGUI:
         self.stop_watch_btn.configure(state="normal" if watching else "disabled")
         self.run_once_btn.configure(state="disabled" if busy else "normal")
         self.reindex_btn.configure(state="disabled" if worker_running else "normal")
+        self.reparse_btn.configure(state="disabled" if worker_running else "normal")
         self.cancel_btn.configure(state="normal" if busy else "disabled")
 
     def _run_in_thread(self, target: Callable[[], None], status_text: str) -> None:
@@ -1539,14 +1605,28 @@ class OrganizerGUI:
                 self.append_log(f"[SCAN] 1회 처리 시작: {watch_dir}")
 
                 if not self.recursive_var.get() or self.watch_mode_var.get() == "all":
-                    scan_existing_pdfs(organizer, watch_dir, log_fn=self.append_log)
+                    scan_existing_pdfs(
+                        organizer,
+                        watch_dir,
+                        log_fn=self.append_log,
+                        workers=self._get_parallel_workers(),
+                        skip_unchanged=True,
+                        force_reparse=False,
+                    )
                 else:
                     for subdir in effective_roots:
                         if self.cancel_event.is_set():
                             self.append_log("[CANCEL] 선택 하위 폴더 처리 취소됨")
                             break
                         self.append_log(f"[SCAN] 선택 하위 폴더 처리: {subdir}")
-                        scan_existing_pdfs(organizer, subdir, log_fn=self.append_log)
+                        scan_existing_pdfs(
+                            organizer,
+                            subdir,
+                            log_fn=self.append_log,
+                            workers=self._get_parallel_workers(),
+                            skip_unchanged=True,
+                            force_reparse=False,
+                        )
 
                 if self.cancel_event.is_set():
                     self.append_log("[SCAN] 1회 처리 취소")
@@ -1634,6 +1714,88 @@ class OrganizerGUI:
         finally:
             self._update_button_states()
 
+    def reparse_all(self) -> None:
+        paths = self._validate_paths()
+        if not paths:
+            return
+
+        watch_dir, output_dir = paths
+
+        if not messagebox.askyesno(
+            "확인",
+            "기존 DB를 비우고 모든 PDF를 병렬로 다시 파싱합니다.\n계속하시겠습니까?"
+        ):
+            return
+
+        effective_roots = self._get_effective_watch_roots(watch_dir)
+        if (
+            self.recursive_var.get()
+            and self.watch_mode_var.get() == "selected"
+            and not effective_roots
+        ):
+            messagebox.showinfo("안내", "처리할 하위 폴더를 먼저 선택해 주세요.")
+            return
+
+        def task() -> None:
+            organizer = self._create_organizer(watch_dir, output_dir)
+            try:
+                self.append_log(
+                    f"[REPARSE] 전체 재파싱 시작: {watch_dir} | workers={self._get_parallel_workers()}"
+                )
+
+                db_path = output_dir / "LOG" / "paper_index.sqlite3"
+                if db_path.exists():
+                    try:
+                        organizer.close()
+                    except Exception:
+                        pass
+                    db_path.unlink(missing_ok=True)
+                    organizer = self._create_organizer(watch_dir, output_dir)
+
+                if not self.recursive_var.get() or self.watch_mode_var.get() == "all":
+                    scan_existing_pdfs(
+                        organizer,
+                        watch_dir,
+                        log_fn=self.append_log,
+                        workers=self._get_parallel_workers(),
+                        skip_unchanged=False,
+                        force_reparse=True,
+                    )
+                else:
+                    for subdir in effective_roots:
+                        if self.cancel_event.is_set():
+                            self.append_log("[CANCEL] 전체 재파싱 취소됨")
+                            break
+                        self.append_log(f"[REPARSE] 선택 하위 폴더 재파싱: {subdir}")
+                        scan_existing_pdfs(
+                            organizer,
+                            subdir,
+                            log_fn=self.append_log,
+                            workers=self._get_parallel_workers(),
+                            skip_unchanged=False,
+                            force_reparse=True,
+                        )
+
+                if self.cancel_event.is_set():
+                    self.append_log("[REPARSE] 전체 재파싱 취소")
+                    self.set_status("전체 재파싱 취소")
+                else:
+                    self.append_log("[REPARSE] 전체 재파싱 완료")
+                    self.set_status("전체 재파싱 완료")
+                    self.root.after(0, self.search)
+
+            except Exception as exc:
+                self.append_log(f"[ERROR] 전체 재파싱 실패: {exc}")
+                self.set_status("전체 재파싱 실패")
+                self.show_error("오류", f"전체 재파싱 중 오류가 발생했습니다:\n{exc}")
+            finally:
+                try:
+                    organizer.close()
+                except Exception:
+                    pass
+
+        self._run_in_thread(task, "전체 재파싱 중")
+
     def reindex(self) -> None:
         output = self.output_var.get().strip()
         if not output:
@@ -1707,6 +1869,7 @@ class OrganizerGUI:
         self._refresh_heading_arrows()
         for item in self.tree.get_children():
             self.tree.delete(item)
+        self._reset_search_dashboard()
 
     def clear_filters(self) -> None:
         self.keyword_var.set("")
@@ -1757,6 +1920,7 @@ class OrganizerGUI:
             index.close()
 
         self._clear_results()
+        self._update_search_dashboard(rows)
 
         for row in rows:
             item_id = self.tree.insert(
