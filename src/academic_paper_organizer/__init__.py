@@ -16,18 +16,11 @@ try:
 except Exception:
     scan_existing_pdfs_fast = None
 
-try:
-    from .gui import (
-        AppConfig,
-        FilteringEventHandler,
-        OrganizerGUI,
-        main,
-    )
-except Exception:
-    AppConfig = None
-    FilteringEventHandler = None
-    OrganizerGUI = None
-    main = None
+from .gui import (
+    AppConfig,
+    FilteringEventHandler,
+    OrganizerGUI,
+)
 
 __all__ = [
     "FIELD_CODES",
@@ -44,5 +37,4 @@ __all__ = [
     "AppConfig",
     "FilteringEventHandler",
     "OrganizerGUI",
-    "main",
 ]

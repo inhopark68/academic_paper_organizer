@@ -32,8 +32,6 @@ from .core import (
     search_pubmed_by_title,
     export_professor_achievements_csv,
     export_latest_yonsei_professors_csv,
-    load_tagged_venue_display_names,
-    infer_venue_type,
 )
 try:
     from .core import scan_existing_pdfs_fast
@@ -190,21 +188,6 @@ class OrganizerGUI:
         self.min_if_var = tk.StringVar(value="")
         self.limit_var = tk.StringVar(value=self.app_config.limit)
         self.search_file_var = tk.StringVar(value="")
-        self.venue_type_var = tk.StringVar(value="unknown")
-
-        self.venue_display_list = load_tagged_venue_display_names()
-        self.filtered_venue_list = self.venue_display_list[:]
-        self.venue_display_map = {
-            item: item.split("] ", 1)[1] if "] " in item else item
-            for item in self.venue_display_list
-        }
-        self.journal_display_count = sum(1 for item in self.venue_display_list if item.startswith("[Journal] "))
-        self.conference_display_count = sum(1 for item in self.venue_display_list if item.startswith("[Conference] "))
-        self.venue_combo = None
-
-        self.scie_combo = None
-        self.quartile_combo = None
-        self.min_if_entry = None
 
         self.crossref_email_var = tk.StringVar(value=self.app_config.crossref_mailto)
         self.crossref_cache_days_var = tk.StringVar(
@@ -252,6 +235,7 @@ class OrganizerGUI:
         self.current_sort_column: str | None = None
         self.checked_items: set[str] = set()
         self.prof_checked_items: set[str] = set()
+        self.latest_professor_list_path: str = ""
 
         self.use_boxed_widgets = True
 
@@ -267,7 +251,6 @@ class OrganizerGUI:
         self.root.after(150, self._drain_log_queue)
 
         self.append_log("[GUI] 애플리케이션 시작")
-        self.append_log(f"[VENUE] 저널 {self.journal_display_count}개 | 학회 {self.conference_display_count}개 로드")
 
     def _configure_styles(self) -> None:
         style = ttk.Style()
@@ -697,65 +680,6 @@ class OrganizerGUI:
         return btn
 
 
-    def _normalize_selected_venue(self, value: str) -> str:
-        value = str(value or "").strip()
-        if not value:
-            return ""
-        return self.venue_display_map.get(value, value)
-
-    def _filter_venue_candidates(self, event=None) -> None:
-        if not self.venue_combo:
-            return
-
-        typed = self.venue_var.get().strip().lower()
-        if not typed:
-            values = self.venue_display_list
-        else:
-            values = []
-            for item in self.venue_display_list:
-                raw_name = self.venue_display_map.get(item, item)
-                if typed in item.lower() or typed in raw_name.lower():
-                    values.append(item)
-
-        self.filtered_venue_list = values[:200]
-        self.venue_combo["values"] = self.filtered_venue_list
-
-    def _reset_venue_candidates(self, event=None) -> None:
-        if not self.venue_combo:
-            return
-        self.venue_combo["values"] = self.venue_display_list
-
-    def _apply_venue_type_rules(self, venue_name: str) -> None:
-        venue_type = infer_venue_type(venue_name)
-        self.venue_type_var.set(venue_type)
-
-        if venue_type == "conference":
-            self.scie_var.set("")
-            self.quartile_var.set("")
-            self.min_if_var.set("")
-
-            if self.scie_combo:
-                self.scie_combo.configure(state="disabled")
-            if self.quartile_combo:
-                self.quartile_combo.configure(state="disabled")
-            if self.min_if_entry:
-                self.min_if_entry.configure(state="disabled")
-            return
-
-        if self.scie_combo:
-            self.scie_combo.configure(state="readonly")
-        if self.quartile_combo:
-            self.quartile_combo.configure(state="readonly")
-        if self.min_if_entry:
-            self.min_if_entry.configure(state="normal")
-
-    def _on_venue_selected(self, event=None) -> None:
-        selected = self.venue_var.get()
-        normalized = self._normalize_selected_venue(selected)
-        self.venue_var.set(normalized)
-        self._apply_venue_type_rules(normalized)
-        self._reset_venue_candidates()
-
     def _set_progress_text(self, text: str) -> None:
         self.root.after(0, lambda: self.progress_var.set(f"진행률: {text}"))
 
@@ -1126,19 +1050,14 @@ class OrganizerGUI:
         ttk.Label(filters, text="저널/학회").grid(
             row=1, column=2, sticky="w", padx=(16, 6), pady=4
         )
-        self.venue_combo = self._grid_combobox(
+        venue_entry = self._grid_entry(
             filters,
             textvariable=self.venue_var,
-            values=self.venue_display_list,
-            state="normal",
             row=1,
             column=3,
             sticky="ew",
             pady=4,
         )
-        self.venue_combo.bind("<KeyRelease>", self._filter_venue_candidates)
-        self.venue_combo.bind("<<ComboboxSelected>>", self._on_venue_selected)
-        self.venue_combo.bind("<Button-1>", self._reset_venue_candidates)
 
         ttk.Label(filters, text="문서유형").grid(
             row=1, column=4, sticky="w", padx=(16, 6), pady=4
@@ -1157,7 +1076,7 @@ class OrganizerGUI:
         ttk.Label(filters, text="SCIE").grid(
             row=2, column=0, sticky="w", padx=(0, 6), pady=4
         )
-        self.scie_combo = self._grid_combobox(
+        scie_combo = self._grid_combobox(
             filters,
             textvariable=self.scie_var,
             values=["", "SCIE", "Yes", "No", "Unknown"],
@@ -1171,7 +1090,7 @@ class OrganizerGUI:
         ttk.Label(filters, text="Q등급").grid(
             row=2, column=2, sticky="w", padx=(16, 6), pady=4
         )
-        self.quartile_combo = self._grid_combobox(
+        quartile_combo = self._grid_combobox(
             filters,
             textvariable=self.quartile_var,
             values=["", "Q1", "Q2", "Q3", "Q4"],
@@ -1185,7 +1104,7 @@ class OrganizerGUI:
         ttk.Label(filters, text="최소 IF").grid(
             row=2, column=4, sticky="w", padx=(16, 6), pady=4
         )
-        self.min_if_entry = self._grid_entry(
+        min_if_entry = self._grid_entry(
             filters,
             textvariable=self.min_if_var,
             width=10,
@@ -1213,11 +1132,11 @@ class OrganizerGUI:
             author_entry,
             year_entry,
             field_combo,
-            self.venue_combo,
+            venue_entry,
             doc_type_combo,
-            self.scie_combo,
-            self.quartile_combo,
-            self.min_if_entry,
+            scie_combo,
+            quartile_combo,
+            min_if_entry,
             limit_entry,
         ]:
             entry.bind("<Return>", lambda event: self.search())
@@ -1533,6 +1452,15 @@ class OrganizerGUI:
             width=18,
             side="left",
         )
+        self._pack_button(
+            top_row,
+            text="교수명단 파일 열기/편집",
+            command=self.open_latest_professors_editor,
+            style_name="Blue.TButton",
+            width=20,
+            side="left",
+            padx=6,
+        )
 
         ttk.Label(top_row, text="생성 구분").pack(side="left", padx=(10, 6))
         self.prof_group_combo = ttk.Combobox(
@@ -1581,7 +1509,7 @@ class OrganizerGUI:
         )
         self._pack_button(
             top_row,
-            text="선택된 성과 지우기",
+            text="선택 항목 지우기",
             command=self._delete_checked_professor_rows,
             style_name="Red.TButton",
             width=16,
@@ -1835,6 +1763,325 @@ class OrganizerGUI:
             webbrowser.open(f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/")
         elif doi:
             webbrowser.open(f"https://doi.org/{doi}")
+
+    def _load_latest_professors_rows(self, file_path: str) -> list[dict[str, str]]:
+        with open(file_path, newline="", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            return [
+                {
+                    "group": str(row.get("group", "") or "").strip(),
+                    "name": str(row.get("name", row.get("professor", "")) or "").strip(),
+                    "query": str(row.get("query", "") or "").strip(),
+                    "department": str(row.get("department", "") or "").strip(),
+                    "affiliation": str(row.get("affiliation", "") or "").strip(),
+                    "source_url": str(row.get("source_url", "") or "").strip(),
+                    "orcid": str(row.get("orcid", "") or "").strip(),
+                }
+                for row in reader
+            ]
+
+    def open_latest_professors_editor(self, file_path: str | None = None) -> None:
+        target_path = file_path or self.latest_professor_list_path
+        if not target_path:
+            target_path = filedialog.askopenfilename(
+                title="최신 교수명단 CSV 열기",
+                filetypes=[("CSV 파일", "*.csv"), ("모든 파일", "*.*")],
+            )
+        if not target_path:
+            return
+
+        try:
+            rows = self._load_latest_professors_rows(target_path)
+        except Exception as exc:
+            self.append_log(f"[YONSEI-EDIT-ERROR] 교수명단 열기 실패: {target_path} | {exc}")
+            messagebox.showerror("오류", f"교수명단 파일을 열 수 없습니다.\n{exc}")
+            return
+
+        self.latest_professor_list_path = str(target_path)
+
+        editor = tk.Toplevel(self.root)
+        editor.title("최신 교수명단 검토 / 선택 저장")
+        editor.geometry("1280x760")
+        editor.minsize(980, 600)
+
+        checked: set[str] = set()
+        row_meta: dict[str, dict[str, str]] = {}
+        current_path = {"value": str(target_path)}
+
+        top = ttk.Frame(editor, padding=10)
+        top.pack(fill="x")
+
+        info_var = tk.StringVar(value=f"파일: {current_path['value']}")
+        count_var = tk.StringVar()
+
+        ttk.Label(top, textvariable=info_var).pack(side="left", padx=(0, 12))
+        ttk.Label(top, textvariable=count_var).pack(side="left")
+
+        btns = ttk.Frame(editor, padding=(10, 0, 10, 8))
+        btns.pack(fill="x")
+
+        tree_frame = ttk.Frame(editor, padding=(10, 0, 10, 10))
+        tree_frame.pack(fill="both", expand=True)
+
+        columns = ("name", "department", "group", "affiliation", "query", "source_url", "orcid")
+        tree = ttk.Treeview(
+            tree_frame,
+            columns=columns,
+            show="tree headings",
+            selectmode="extended",
+        )
+        tree.heading("#0", text="선택")
+        tree.column("#0", width=64, minwidth=56, anchor="center", stretch=False)
+
+        headings = {
+            "name": "교수명",
+            "department": "교실",
+            "group": "구분",
+            "affiliation": "소속",
+            "query": "영문이름(Query)",
+            "source_url": "출처 URL",
+            "orcid": "ORCID",
+        }
+        widths = {
+            "name": 100,
+            "department": 130,
+            "group": 100,
+            "affiliation": 180,
+            "query": 180,
+            "source_url": 340,
+            "orcid": 180,
+        }
+        for col in columns:
+            tree.heading(col, text=headings[col])
+            tree.column(col, width=widths[col], anchor="w")
+
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        vsb.pack(side="right", fill="y")
+        hsb.pack(side="bottom", fill="x")
+        tree.pack(side="left", fill="both", expand=True)
+
+        def set_checked(item_id: str, state: bool) -> None:
+            if state:
+                checked.add(item_id)
+                tree.item(item_id, text="☑")
+            else:
+                checked.discard(item_id)
+                tree.item(item_id, text="☐")
+
+        def checked_ids() -> list[str]:
+            valid = set(tree.get_children())
+            stale = [item_id for item_id in checked if item_id not in valid]
+            for item_id in stale:
+                checked.discard(item_id)
+            return [item_id for item_id in tree.get_children() if item_id in checked]
+
+        def refresh_count() -> None:
+            count_var.set(f"행 수: {len(tree.get_children())} | 선택: {len(checked_ids())}")
+
+        def toggle_selected(event=None):
+            selected = list(tree.selection())
+            if not selected:
+                return "break"
+            should_check = any(item_id not in checked for item_id in selected)
+            for item_id in selected:
+                set_checked(item_id, should_check)
+            refresh_count()
+            return "break"
+
+        def on_click(event):
+            region = tree.identify("region", event.x, event.y)
+            column = tree.identify_column(event.x)
+            item_id = tree.identify_row(event.y)
+            if region == "tree" and column == "#0" and item_id:
+                set_checked(item_id, item_id not in checked)
+                refresh_count()
+                return "break"
+            return None
+
+        def populate(data_rows: list[dict[str, str]]) -> None:
+            for item in tree.get_children():
+                tree.delete(item)
+            checked.clear()
+            row_meta.clear()
+            for row in data_rows:
+                item_id = tree.insert(
+                    "",
+                    "end",
+                    text="☐",
+                    values=(
+                        row.get("name", ""),
+                        row.get("department", ""),
+                        row.get("group", ""),
+                        row.get("affiliation", ""),
+                        row.get("query", ""),
+                        row.get("source_url", ""),
+                        row.get("orcid", ""),
+                    ),
+                )
+                row_meta[item_id] = dict(row)
+            refresh_count()
+
+        def reload_current_file() -> None:
+            try:
+                data_rows = self._load_latest_professors_rows(current_path["value"])
+            except Exception as exc:
+                self.append_log(
+                    f"[YONSEI-EDIT-ERROR] 교수명단 다시 불러오기 실패: {current_path['value']} | {exc}"
+                )
+                messagebox.showerror(
+                    "오류",
+                    f"교수명단 파일을 다시 불러올 수 없습니다.\n{exc}",
+                    parent=editor,
+                )
+                return
+            populate(data_rows)
+            info_var.set(f"파일: {current_path['value']}")
+            self.latest_professor_list_path = current_path["value"]
+            self.append_log(
+                f"[YONSEI-EDIT] 교수명단 다시 불러오기 완료: {current_path['value']} | {len(data_rows)}명"
+            )
+
+        def open_another_file() -> None:
+            next_path = filedialog.askopenfilename(
+                title="교수명단 CSV 열기",
+                initialdir=str(Path(current_path["value"]).parent) if current_path["value"] else str(Path.home()),
+                filetypes=[("CSV 파일", "*.csv"), ("모든 파일", "*.*")],
+                parent=editor,
+            )
+            if not next_path:
+                return
+            current_path["value"] = str(next_path)
+            reload_current_file()
+
+        def delete_checked() -> None:
+            ids = checked_ids()
+            if not ids:
+                messagebox.showwarning("알림", "먼저 삭제할 교수를 선택하세요.", parent=editor)
+                return
+            if not messagebox.askyesno("확인", f"선택한 교수 {len(ids)}명을 목록에서 제거할까요?", parent=editor):
+                return
+            for item_id in ids:
+                if item_id in tree.get_children():
+                    tree.delete(item_id)
+                checked.discard(item_id)
+                row_meta.pop(item_id, None)
+            refresh_count()
+
+        def save_rows(only_checked: bool = False) -> None:
+            item_ids = checked_ids() if only_checked else list(tree.get_children())
+            if not item_ids:
+                messagebox.showwarning("알림", "저장할 교수가 없습니다.", parent=editor)
+                return
+
+            initial_dir = str(Path(current_path["value"]).parent)
+            initial_name = Path(current_path["value"]).stem + ("_selected" if only_checked else "_edited") + ".csv"
+            save_path = filedialog.asksaveasfilename(
+                title="교수명단 CSV 저장",
+                defaultextension=".csv",
+                initialdir=initial_dir,
+                initialfile=initial_name,
+                filetypes=[("CSV", "*.csv")],
+                parent=editor,
+            )
+            if not save_path:
+                return
+
+            export_rows = []
+            for item_id in item_ids:
+                values = tree.item(item_id, "values")
+                meta = row_meta.get(item_id, {})
+                export_rows.append({
+                    "group": values[2] if len(values) > 2 else meta.get("group", ""),
+                    "name": values[0] if len(values) > 0 else meta.get("name", ""),
+                    "query": values[4] if len(values) > 4 else meta.get("query", ""),
+                    "department": values[1] if len(values) > 1 else meta.get("department", ""),
+                    "affiliation": values[3] if len(values) > 3 else meta.get("affiliation", ""),
+                    "source_url": values[5] if len(values) > 5 else meta.get("source_url", ""),
+                    "orcid": values[6] if len(values) > 6 else meta.get("orcid", ""),
+                })
+
+            with open(save_path, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.DictWriter(
+                    f,
+                    fieldnames=["group", "name", "query", "department", "affiliation", "source_url", "orcid"],
+                )
+                writer.writeheader()
+                writer.writerows(export_rows)
+
+            current_path["value"] = save_path
+            self.latest_professor_list_path = save_path
+            info_var.set(f"파일: {save_path}")
+            self.append_log(f"[YONSEI-EDIT] 교수명단 저장 완료: {save_path} | {len(export_rows)}명")
+            self.set_status(f"교수명단 저장 완료: {len(export_rows)}명")
+            messagebox.showinfo("완료", f"교수명단 저장이 완료되었습니다.\n\n{save_path}", parent=editor)
+
+        self._pack_button(
+            btns,
+            text="다른 파일 열기",
+            command=open_another_file,
+            style_name="Soft.TButton",
+            width=14,
+            side="left",
+            padx=4,
+            pady=4,
+        )
+        self._pack_button(
+            btns,
+            text="현재 파일 다시 불러오기",
+            command=reload_current_file,
+            style_name="Soft.TButton",
+            width=18,
+            side="left",
+            padx=4,
+            pady=4,
+        )
+        self._pack_button(
+            btns,
+            text="선택 토글",
+            command=toggle_selected,
+            style_name="Soft.TButton",
+            width=12,
+            side="left",
+            padx=4,
+            pady=4,
+        )
+        self._pack_button(
+            btns,
+            text="선택 삭제",
+            command=delete_checked,
+            style_name="Red.TButton",
+            width=12,
+            side="left",
+            padx=4,
+            pady=4,
+        )
+        self._pack_button(
+            btns,
+            text="현재 목록 저장",
+            command=lambda: save_rows(False),
+            style_name="Green.TButton",
+            width=14,
+            side="left",
+            padx=4,
+            pady=4,
+        )
+        self._pack_button(
+            btns,
+            text="선택만 저장",
+            command=lambda: save_rows(True),
+            style_name="Blue.TButton",
+            width=14,
+            side="left",
+            padx=4,
+            pady=4,
+        )
+
+        tree.bind("<Button-1>", on_click, add="+")
+        tree.bind("<space>", toggle_selected)
+
+        populate(rows)
 
     def _build_log_tab(self, parent: ttk.Frame) -> None:
         frame = ttk.Frame(parent)
@@ -2526,9 +2773,6 @@ class OrganizerGUI:
             messagebox.showwarning("경고", "출력 폴더를 지정해 주세요.")
             return
 
-        self.venue_var.set(self._normalize_selected_venue(self.venue_var.get()))
-        self._apply_venue_type_rules(self.venue_var.get())
-
         db_path = Path(output).expanduser().resolve() / "LOG" / "paper_index.sqlite3"
         if not db_path.exists():
             self.append_log("[WARN] 검색 인덱스가 없습니다.")
@@ -2542,17 +2786,6 @@ class OrganizerGUI:
             messagebox.showwarning("경고", "최대 건수는 숫자로 입력해 주세요.")
             return
 
-        venue_type = self.venue_type_var.get()
-
-        scie = self.scie_var.get().strip() or None
-        min_if = self.min_if_var.get().strip() or None
-        quartile = self.quartile_var.get().strip() or None
-
-        if venue_type == "conference":
-            scie = None
-            min_if = None
-            quartile = None
-
         index = PaperIndex(db_path)
         try:
             rows = index.search(
@@ -2562,10 +2795,9 @@ class OrganizerGUI:
                 field_code=self.field_var.get().strip() or None,
                 venue=self.venue_var.get().strip() or None,
                 doc_type=self.doc_type_var.get().strip() or None,
-                file_path=self.search_file_var.get().strip() or None,
-                scie=scie,
-                min_impact_factor=min_if,
-                quartile=quartile,
+                scie=self.scie_var.get().strip() or None,
+                min_impact_factor=self.min_if_var.get().strip() or None,
+                quartile=self.quartile_var.get().strip() or None,
                 limit=limit,
             )
         except Exception as exc:
@@ -2600,15 +2832,8 @@ class OrganizerGUI:
             )
             self.snippets[item_id] = row.snippet or ""
 
-        if venue_type == "conference":
-            status_msg = f"[SEARCH] 학회 기준 검색 완료: {len(rows)}건"
-        elif venue_type == "journal":
-            status_msg = f"[SEARCH] 저널 기준 검색 완료: {len(rows)}건"
-        else:
-            status_msg = f"[SEARCH] 검색 완료: {len(rows)}건"
-
-        self.status_var.set(status_msg)
-        self.append_log(status_msg)
+        self.status_var.set(f"[SEARCH] 검색 완료: {len(rows)}건")
+        self.append_log(f"[SEARCH] 검색 완료: {len(rows)}건")
 
         if rows:
             first = self.tree.get_children()[0]
@@ -3122,8 +3347,18 @@ class OrganizerGUI:
         )
 
     def export_latest_professors_list(self) -> None:
+        selected_group = (self.prof_group_var.get() or "전체").strip() or "전체"
+        group_slug = {
+            "전체": "all",
+            "기초의학": "basic",
+            "임상의학": "clinical",
+            "인문의학": "humanities",
+        }.get(selected_group, "all")
+
         default_dir = Path(self.output_var.get().strip() or str(Path.home()))
-        default_name = f"yonsei_professors_latest_{time.strftime('%Y%m%d_%H%M%S')}"
+        default_name = (
+            f"yonsei_professors_latest_{group_slug}_{time.strftime('%Y%m%d_%H%M%S')}"
+        )
         output_csv = filedialog.asksaveasfilename(
             title="최신 연세의대 교수명단 CSV 저장",
             defaultextension=".csv",
@@ -3134,29 +3369,37 @@ class OrganizerGUI:
         if not output_csv:
             return
 
-        self.set_status("연세의대 최신 교수명단 수집 중...")
-        self.append_log("[YONSEI] 최신 교수명단 자동 수집 시작")
+        self.set_status(f"연세의대 최신 교수명단 수집 중... ({selected_group})")
+        self.append_log(
+            f"[YONSEI] 최신 교수명단 자동 수집 시작 | 구분={selected_group}"
+        )
 
         def worker() -> None:
             try:
                 result = export_latest_yonsei_professors_csv(
                     output_csv,
+                    group_filter=selected_group,
                     logger=self.append_log,
                 )
                 self.root.after(
                     0,
                     lambda: self.set_status(
-                        f"최신 교수명단 저장 완료: {result.get('professors', 0)}명"
+                        f"최신 교수명단 저장 완료({selected_group}): "
+                        f"{result.get('professors', 0)}명"
                     ),
                 )
-                self.root.after(
-                    0,
-                    lambda: messagebox.showinfo(
+                def _after_success() -> None:
+                    self.latest_professor_list_path = output_csv
+                    messagebox.showinfo(
                         "완료",
                         "최신 연세의대 교수명단 CSV 생성이 완료되었습니다.\n\n"
-                        f"저장 파일: {output_csv}",
-                    ),
-                )
+                        f"구분: {selected_group}\n"
+                        f"저장 파일: {output_csv}\n\n"
+                        "이어서 파일을 열어 선택 저장/삭제할 수 있습니다.",
+                    )
+                    self.open_latest_professors_editor(output_csv)
+
+                self.root.after(0, _after_success)
             except Exception as exc:
                 self.append_log(f"[YONSEI-ERROR] {exc}")
                 self.root.after(

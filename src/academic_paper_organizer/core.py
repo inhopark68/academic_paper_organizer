@@ -2,17 +2,17 @@ from __future__ import annotations
 
 import csv
 import json
-import os
 import re
 import shutil
 import sqlite3
 import threading
 import time
+from difflib import SequenceMatcher
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
-from urllib.parse import quote, quote_plus, urljoin
+from urllib.parse import quote, quote_plus, urljoin, urlparse
 
 import pandas as pd
 import requests
@@ -51,18 +51,6 @@ FIELD_CODES: dict[str, str] = {
 }
 
 
-CONFERENCE_NAMES: list[str] = [
-    "NeurIPS", "ICML", "ICLR", "AAAI", "IJCAI", "AISTATS", "UAI",
-    "ACL", "EMNLP", "NAACL", "COLING", "EACL", "Findings of ACL", "CoNLL", "LREC-COLING", "Interspeech",
-    "CVPR", "ICCV", "ECCV", "WACV", "BMVC", "ACCV",
-    "KDD", "WWW", "The Web Conference", "SIGIR", "CIKM", "WSDM", "ECIR", "RecSys",
-    "SIGMOD", "VLDB", "ICDE", "PODS", "SOSP", "OSDI", "EuroSys", "NSDI",
-    "SIGCOMM", "MobiCom", "USENIX Security", "IEEE Symposium on Security and Privacy", "NDSS", "CCS",
-    "CHI", "UIST", "IROS", "ICRA", "RSS",
-    "ISMB", "MICCAI",
-]
-
-
 @dataclass
 class PaperRow:
     field_code: str
@@ -98,92 +86,12 @@ def normalize_journal_name(name: str) -> str:
     return text
 
 
-def _candidate_journal_metrics_paths(csv_path: str | Path = "journal_metrics.csv") -> list[Path]:
-    raw = Path(csv_path)
-    candidates: list[Path] = []
-
-    if raw.is_absolute():
-        candidates.append(raw)
-    else:
-        module_dir = Path(__file__).resolve().parent
-        cwd = Path.cwd()
-        env_path = os.environ.get("JOURNAL_METRICS_CSV", "").strip()
-
-        if env_path:
-            candidates.append(Path(env_path).expanduser())
-
-        candidates.extend([
-            module_dir / raw,
-            module_dir / "data" / raw.name,
-            module_dir.parent / raw,
-            module_dir.parent / "data" / raw.name,
-            cwd / raw,
-            cwd / "data" / raw.name,
-        ])
-
-    deduped: list[Path] = []
-    seen: set[str] = set()
-    for path in candidates:
-        try:
-            resolved = path.expanduser().resolve()
-        except Exception:
-            resolved = path.expanduser()
-        key = str(resolved)
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(resolved)
-    return deduped
-
-
-
-
-def _resolve_journal_metrics_path(csv_path: str | Path = "journal_metrics.csv") -> Path | None:
-    raw = Path(csv_path)
-    candidates: list[Path] = []
-
-    env_value = os.environ.get("JOURNAL_METRICS_CSV", "").strip()
-    if env_value:
-        candidates.append(Path(env_value).expanduser())
-
-    if raw.is_absolute():
-        candidates.append(raw)
-    else:
-        module_dir = Path(__file__).resolve().parent
-        cwd = Path.cwd()
-        candidates.extend([
-            module_dir / raw,
-            module_dir / "data" / raw.name,
-            module_dir.parent / raw,
-            module_dir.parent / "data" / raw.name,
-            cwd / raw,
-            cwd / "data" / raw.name,
-        ])
-
-    seen: set[str] = set()
-    for candidate in candidates:
-        try:
-            resolved = candidate.expanduser().resolve()
-        except Exception:
-            resolved = candidate.expanduser()
-
-        key = str(resolved)
-        if key in seen:
-            continue
-        seen.add(key)
-
-        if resolved.exists() and resolved.is_file():
-            return resolved
-
-    return None
-
-
 def load_journal_metrics(csv_path: str | Path = "journal_metrics.csv") -> dict[str, dict[str, str]]:
     data: dict[str, dict[str, str]] = {}
     try:
-        path = _resolve_journal_metrics_path(csv_path)
-        if path is None:
-            return {}
+        path = Path(csv_path)
+        if not path.is_absolute():
+            path = Path(__file__).resolve().parent / path
         with path.open("r", encoding="utf-8-sig", newline="") as f:
             reader = csv.DictReader(f)
             for row in reader:
@@ -212,89 +120,6 @@ def load_journal_metrics(csv_path: str | Path = "journal_metrics.csv") -> dict[s
 
 
 JOURNAL_DB = load_journal_metrics()
-
-
-def load_journal_display_names(csv_path: str | Path = "journal_metrics.csv") -> list[str]:
-    names: list[str] = []
-    seen: set[str] = set()
-
-    try:
-        path = _resolve_journal_metrics_path(csv_path)
-        if path is None:
-            return []
-
-        with path.open("r", encoding="utf-8-sig", newline="") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                name = str(row.get("Journal Name", "")).strip()
-                if not name:
-                    continue
-
-                key = name.casefold()
-                if key in seen:
-                    continue
-
-                seen.add(key)
-                names.append(name)
-    except Exception:
-        return []
-
-    return sorted(names, key=str.casefold)
-
-
-def load_tagged_venue_display_names(csv_path: str | Path = "journal_metrics.csv") -> list[str]:
-    seen: set[str] = set()
-    tagged_items: list[str] = []
-
-    for name in load_journal_display_names(csv_path):
-        clean_name = str(name).strip()
-        if not clean_name:
-            continue
-        key = clean_name.casefold()
-        if key in seen:
-            continue
-        seen.add(key)
-        tagged_items.append(f"[Journal] {clean_name}")
-
-    for name in CONFERENCE_NAMES:
-        clean_name = str(name).strip()
-        if not clean_name:
-            continue
-        key = clean_name.casefold()
-        if key in seen:
-            continue
-        seen.add(key)
-        tagged_items.append(f"[Conference] {clean_name}")
-
-    return sorted(tagged_items, key=str.casefold)
-
-
-def is_conference_name(name: str) -> bool:
-    target = str(name or "").strip().casefold()
-    if not target:
-        return False
-
-    for conf in CONFERENCE_NAMES:
-        if target == str(conf).strip().casefold():
-            return True
-    return False
-
-
-def is_journal_name(name: str, csv_path: str | Path = "journal_metrics.csv") -> bool:
-    target = normalize_journal_name(name)
-    if not target:
-        return False
-
-    db = load_journal_metrics(csv_path)
-    return target in db
-
-
-def infer_venue_type(name: str, csv_path: str | Path = "journal_metrics.csv") -> str:
-    if is_conference_name(name):
-        return "conference"
-    if is_journal_name(name, csv_path):
-        return "journal"
-    return "unknown"
 
 
 def classify_quartile(impact_factor: str | float | int | None) -> str:
@@ -2465,7 +2290,7 @@ import re
 import json
 from pathlib import Path
 from typing import Callable
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import pandas as pd
 import requests
@@ -2615,22 +2440,142 @@ BAD_NAME_SUBSTRINGS = [
     "로그인", "회원가입", "교수의 책무", "학교안내", "학장소개",
 ]
 
+
+EN_BAD_WORDS = {
+    "professor", "staff", "department", "college", "medicine", "medical",
+    "research", "education", "biochemistry", "molecular", "biology",
+    "introduction", "contact", "laboratory", "lab", "home", "faculty",
+}
+
+KOREAN_SURNAME_TO_EN = {
+    "김": {"kim", "gim"},
+    "이": {"lee", "yi", "rhee"},
+    "박": {"park", "bak"},
+    "최": {"choi"},
+    "정": {"jung", "jeong", "chung"},
+    "조": {"cho", "jo"},
+    "강": {"kang", "gang"},
+    "윤": {"yoon", "yun"},
+    "장": {"jang"},
+    "임": {"lim", "im"},
+    "한": {"han"},
+    "오": {"oh", "o"},
+    "서": {"seo", "suh"},
+    "신": {"shin"},
+    "유": {"yu", "yoo"},
+    "송": {"song"},
+    "홍": {"hong"},
+    "문": {"moon", "mun"},
+    "고": {"ko", "go"},
+    "양": {"yang"},
+    "손": {"son"},
+    "배": {"bae"},
+    "백": {"baek", "paik"},
+    "허": {"heo", "huh"},
+    "남": {"nam"},
+    "노": {"noh", "roh"},
+}
+
+KOR_ROMA = {
+    "가": ["ga", "ka"], "강": ["kang"], "건": ["geon", "gun"], "경": ["gyeong", "kyung"],
+    "고": ["go", "ko"], "관": ["gwan"], "광": ["gwang"], "구": ["gu", "koo"],
+    "규": ["gyu", "kyu"], "근": ["geun", "keun"], "기": ["gi", "ki"],
+    "김": ["kim", "gim"], "나": ["na"], "남": ["nam"], "노": ["no", "roh", "noh"],
+    "다": ["da"], "도": ["do"], "동": ["dong"], "두": ["doo", "du"],
+    "라": ["ra", "la"], "류": ["ryu", "yu"], "리": ["lee", "ri", "yi"], "민": ["min"],
+    "박": ["park", "bak"], "배": ["bae"], "백": ["baek", "paik"], "범": ["beom", "bum"],
+    "병": ["byeong", "byung"], "상": ["sang"], "석": ["seok", "suk"], "선": ["sun", "seon"],
+    "성": ["seong", "sung"], "소": ["so"], "수": ["su", "soo"], "순": ["sun", "soon"],
+    "승": ["seung", "sung"], "시": ["si", "shi"], "신": ["shin"], "아": ["a"],
+    "안": ["an"], "양": ["yang"], "엄": ["eom", "um"], "여": ["yeo"], "연": ["yeon"],
+    "영": ["yeong", "young"], "예": ["ye"], "오": ["oh", "o"], "옥": ["ok"],
+    "완": ["wan"], "용": ["yong"], "우": ["u", "woo"], "원": ["won"],
+    "유": ["yu", "yoo"], "윤": ["yoon", "yun"], "은": ["eun"], "이": ["i", "lee", "yi"],
+    "인": ["in"], "임": ["lim", "im"], "장": ["jang"], "재": ["jae"], "전": ["jeon", "jun"],
+    "정": ["jeong", "jung", "chung"], "제": ["je"], "조": ["jo", "cho"], "종": ["jong"],
+    "주": ["ju", "joo"], "준": ["jun"], "지": ["ji"], "진": ["jin"], "차": ["cha"],
+    "창": ["chang"], "채": ["chae"], "철": ["cheol", "chul"], "최": ["choi"],
+    "태": ["tae"], "하": ["ha"], "한": ["han"], "현": ["hyeon", "hyun"], "형": ["hyeong", "hyung"],
+    "혜": ["hye"], "호": ["ho"], "홍": ["hong"], "화": ["hwa"], "환": ["hwan"], "훈": ["hoon", "hun"], "희": ["hee", "hui"],
+}
 TITLE_WORDS = [
-    "교수", "조교수", "부교수", "명예교수",
+    "임상조교수", "임상부교수", "임상교수", "중계교수", "중견교수",
+    "조교수", "부교수", "명예교수", "교수",
     "Professor", "professor", "M.D.", "Ph.D.", "MD", "PhD",
 ]
+
+BAD_LINK_TEXTS = {
+    "콘텐츠 바로가기", "주메뉴 바로가기", "푸터 바로가기", "로그인", "회원가입",
+    "전체메뉴", "전체메뉴 열기", "전체메뉴 닫기", "교육", "연세의료원 네트워크",
+    "home", "top",
+}
+
+BAD_LINK_SUBSTRINGS = [
+    "바로가기", "로그인", "회원가입", "전체메뉴", "사이트맵", "sitemap",
+    "copyright", "개인정보처리방침", "이용약관",
+]
+
+BAD_LINK_HREF_SUBSTRINGS = [
+    "#", "login", "join", "member", "logout", "sitemap", "javascript:", "mailto:",
+]
+
+
+def _strip_professor_role_words(text: str) -> str:
+    value = str(text or "")
+    for token in sorted(TITLE_WORDS, key=len, reverse=True):
+        value = value.replace(token, " ")
+    value = re.sub(r"\b(Professor|professor|M\.D\.|Ph\.D\.|MD|PhD)\b", " ", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
 
 
 def _normalize_professor_name(name: str) -> str:
     text = str(name or "")
     text = re.sub(r"<[^>]+>", " ", text)
-
-    for token in TITLE_WORDS:
-        text = text.replace(token, " ")
-
+    text = _strip_professor_role_words(text)
     text = re.sub(r"[|/·•,()\[\]<>]+", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+def _extract_korean_name_candidates(text: str) -> list[str]:
+    value = _normalize_professor_name(text)
+    if not value:
+        return []
+
+    candidates: list[str] = []
+    for match in re.finditer(r"(?<![가-힣])[가-힣]{2,4}(?![가-힣])", value):
+        token = match.group(0).strip()
+        if _looks_like_professor_name(token):
+            candidates.append(token)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for token in candidates:
+        if token not in seen:
+            seen.add(token)
+            deduped.append(token)
+    return deduped
+def _normalize_english_professor_name(name: str) -> str:
+    value = _strip_professor_role_words(str(name or ""))
+    value = re.sub(r"[^A-Za-z\s.'\-]", " ", value)
+    value = re.sub(r"\s+", " ", value).strip(" .,-")
+    if not value:
+        return ""
+
+    tokens = []
+    for token in value.split():
+        if len(token) == 1:
+            tokens.append(token.upper())
+        else:
+            tokens.append(token[0].upper() + token[1:])
+    value = " ".join(tokens).strip()
+
+    if re.fullmatch(r"[A-Z][A-Za-z'\-]+(?: [A-Z][A-Za-z'\-]+){1,3}", value):
+        return value
+    if re.fullmatch(r"[A-Z]\.\s?[A-Z][A-Za-z'\-]+", value):
+        return value
+    return ""
 
 
 def _normalize_professor_name_for_query(name: str) -> str:
@@ -2640,6 +2585,55 @@ def _normalize_professor_name_for_query(name: str) -> str:
     return f'"{name}" 연세대학교 의과대학'
 
 
+def _extract_english_name_candidates(text: str) -> list[str]:
+    value = _strip_professor_role_words(str(text or ""))
+    value = re.sub(r"\s+", " ", value).strip()
+    if not value:
+        return []
+
+    patterns = [
+        r"[A-Z][A-Za-z'\-]+(?:\s+[A-Z][A-Za-z'\-]+){1,3}",
+        r"[A-Z]\.\s?[A-Z][A-Za-z'\-]+",
+    ]
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for pattern in patterns:
+        for match in re.finditer(pattern, value):
+            token = _normalize_english_professor_name(match.group(0))
+            if token and token.casefold() not in seen:
+                seen.add(token.casefold())
+                candidates.append(token)
+    return candidates
+
+
+def _extract_korean_english_name_pairs(html: str) -> dict[str, str]:
+    soup = BeautifulSoup(html, "html.parser")
+    soup = _remove_layout_noise(soup)
+
+    pairs: dict[str, str] = {}
+    nodes = soup.select("strong, b, dt, dd, li, td, p, h3, h4, h5, span, a")
+    for node in nodes:
+        text = node.get_text(" ", strip=True)
+        if not text or len(text) > 120:
+            continue
+
+        korean_names: list[str] = []
+        english_names: list[str] = []
+        parts = [part.strip() for part in re.split(r"[|/,\n]|\s{2,}", text) if part.strip()]
+        for part in parts:
+            korean_names.extend(_extract_korean_name_candidates(part))
+            english_names.extend(_extract_english_name_candidates(part))
+
+        if len(korean_names) == 1 and len(english_names) == 1:
+            pairs.setdefault(korean_names[0], english_names[0])
+            continue
+
+        whole_ko = _extract_korean_name_candidates(text)
+        whole_en = _extract_english_name_candidates(text)
+        if len(whole_ko) == 1 and len(whole_en) == 1:
+            pairs.setdefault(whole_ko[0], whole_en[0])
+
+    return pairs
 def _looks_like_professor_name(text: str) -> bool:
     value = _normalize_professor_name(text)
     if not value:
@@ -2706,6 +2700,8 @@ def _extract_names_from_rendered_html(html: str) -> list[str]:
             normalized = _normalize_professor_name(part)
             if _looks_like_professor_name(normalized):
                 candidates.append(normalized)
+                continue
+            candidates.extend(_extract_korean_name_candidates(part))
 
     deduped: list[str] = []
     seen: set[str] = set()
@@ -2718,6 +2714,219 @@ def _extract_names_from_rendered_html(html: str) -> list[str]:
     return deduped
 
 
+
+
+def _normalize_en_name(name: str) -> str:
+    text = re.sub(r"[^A-Za-z\s\-]", " ", str(name or ""))
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _looks_like_english_name(text: str) -> bool:
+    value = _normalize_en_name(text)
+    if not value:
+        return False
+
+    parts = value.split()
+    if len(parts) < 2 or len(parts) > 4:
+        return False
+
+    for p in parts:
+        if len(p) < 2:
+            return False
+        if p.lower() in EN_BAD_WORDS:
+            return False
+        if not re.fullmatch(r"[A-Z][a-zA-Z\-]*", p):
+            return False
+    return True
+
+
+def _extract_english_names_from_text(text: str) -> list[str]:
+    if not text:
+        return []
+
+    candidates: list[str] = []
+    pattern = re.compile(r"[A-Z][a-zA-Z\-]+(?:\s+[A-Z][a-zA-Z\-]+){1,3}")
+    for m in pattern.finditer(text):
+        name = _normalize_en_name(m.group(0))
+        if _looks_like_english_name(name):
+            candidates.append(name)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for name in candidates:
+        key = name.casefold()
+        if key not in seen:
+            seen.add(key)
+            deduped.append(name)
+    return deduped
+
+
+def _extract_english_names_from_rendered_html(html: str) -> list[str]:
+    soup = BeautifulSoup(html or "", "html.parser")
+    soup = _remove_layout_noise(soup)
+
+    texts: list[str] = []
+    for tag in soup.find_all(["li", "td", "div", "span", "p", "a", "strong"]):
+        text = re.sub(r"\s+", " ", tag.get_text(" ", strip=True))
+        if text:
+            texts.append(text)
+
+    collected: list[str] = []
+    for text in texts:
+        collected.extend(_extract_english_names_from_text(text))
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for name in collected:
+        key = name.casefold()
+        if key not in seen:
+            seen.add(key)
+            deduped.append(name)
+    return deduped
+
+
+def ko_to_en_department_url(ko_url: str) -> str:
+    url = str(ko_url or "").strip()
+    if not url:
+        return ""
+    url = url.replace("/medicine/", "/medicine-en/")
+    url = url.replace("/research/basic/", "/education/basic/")
+    url = url.replace("/about/professor/clinic/", "/education/clinical/")
+    url = url.replace("/about/professor/humanities/", "/education/humanistic/")
+    return url
+
+
+def _find_professor_staff_url(page, base_url: str) -> str:
+    try:
+        anchors = page.locator("a")
+        count = min(anchors.count(), 300)
+    except Exception:
+        return base_url
+
+    for i in range(count):
+        try:
+            a = anchors.nth(i)
+            href = a.get_attribute("href") or ""
+            text = re.sub(r"\s+", " ", a.inner_text() or "").strip().casefold()
+            if "professor staff" in text or text == "professor":
+                return urljoin(base_url, href)
+        except Exception:
+            continue
+    return base_url
+
+
+def _romanize_loose_korean_name(name: str) -> list[str]:
+    name = str(name or "").strip()
+    if not re.fullmatch(r"[가-힣]{2,4}", name):
+        return []
+
+    surname = name[0]
+    given = name[1:]
+    surname_opts = list(KOREAN_SURNAME_TO_EN.get(surname, set()) or KOR_ROMA.get(surname, []))
+    if not surname_opts:
+        surname_opts = [surname]
+
+    given_opts = [""]
+    for ch in given:
+        roma = KOR_ROMA.get(ch, [ch])
+        next_opts = []
+        for prefix in given_opts:
+            for r in roma:
+                next_opts.append((prefix + r).strip())
+                next_opts.append((prefix + " " + r).strip())
+        given_opts = next_opts[:40]
+
+    candidates: set[str] = set()
+    for s in surname_opts:
+        for g in given_opts:
+            candidates.add(f"{g} {s}".strip().lower())
+            candidates.add(f"{s} {g}".strip().lower())
+            candidates.add(f"{g}{s}".strip().lower())
+    return sorted(candidates)
+
+
+def _similarity(a: str, b: str) -> float:
+    return SequenceMatcher(None, a.lower().strip(), b.lower().strip()).ratio()
+
+
+def _match_korean_to_english_names(ko_names: list[str], en_names: list[str]) -> dict[str, str]:
+    matched: dict[str, str] = {}
+    used_en: set[int] = set()
+    norm_en = [_normalize_en_name(x) for x in en_names]
+
+    for i, ko_name in enumerate(ko_names):
+        best_idx = -1
+        best_score = -1
+        ko_surname = ko_name[0] if ko_name else ""
+        roma_candidates = _romanize_loose_korean_name(ko_name)
+
+        for j, en_name in enumerate(norm_en):
+            if j in used_en:
+                continue
+            parts = en_name.split()
+            if len(parts) < 2:
+                continue
+
+            score = 0
+            en_surname = parts[-1].lower()
+
+            if abs(i - j) <= 1:
+                score += 40
+            if en_surname in KOREAN_SURNAME_TO_EN.get(ko_surname, set()):
+                score += 35
+
+            best_sim = 0.0
+            for candidate in roma_candidates:
+                best_sim = max(best_sim, _similarity(candidate, en_name.lower()))
+            if best_sim >= 0.92:
+                score += 30
+            elif best_sim >= 0.85:
+                score += 20
+            elif best_sim >= 0.75:
+                score += 10
+
+            if score > best_score:
+                best_score = score
+                best_idx = j
+
+        if best_idx >= 0 and best_score >= 60:
+            matched[ko_name] = norm_en[best_idx]
+            used_en.add(best_idx)
+        else:
+            matched[ko_name] = ""
+
+    return matched
+
+
+def _fetch_english_professor_names_for_department(page, ko_department_url: str, logger: Callable[[str], None] | None = None) -> list[str]:
+    log = logger or (lambda _msg: None)
+    en_url = ko_to_en_department_url(ko_department_url)
+    if not en_url:
+        return []
+
+    try:
+        page.goto(en_url, wait_until="domcontentloaded", timeout=20000)
+        try:
+            page.wait_for_load_state("networkidle", timeout=4000)
+        except Exception:
+            pass
+
+        professor_url = _find_professor_staff_url(page, en_url)
+        if professor_url != en_url:
+            page.goto(professor_url, wait_until="domcontentloaded", timeout=20000)
+            try:
+                page.wait_for_load_state("networkidle", timeout=4000)
+            except Exception:
+                pass
+
+        html = page.content()
+        names = _extract_english_names_from_rendered_html(html)
+        log(f"[YONSEI-EN] 영문 교수명 후보 {len(names)}명 | {professor_url}")
+        return names
+    except Exception as exc:
+        log(f"[YONSEI-EN-WARN] 영문 페이지 수집 실패: {en_url} | {exc}")
+        return []
 def _slugify_debug_name(text: str) -> str:
     s = re.sub(r"[^\w가-힣\-\.]+", "_", str(text or "").strip())
     s = re.sub(r"_+", "_", s).strip("_")
@@ -2759,6 +2968,81 @@ def _load_manual_department_urls() -> dict[str, str]:
     return pages
 
 
+def _clean_department_text(text: str) -> str:
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    value = value.replace("교실소개", "").replace("교수소개", "").strip()
+    return value
+
+
+def _is_valid_department_link(index_url: str, href: str, text: str) -> tuple[bool, str]:
+    raw_href = str(href or "").strip()
+    raw_text = _clean_department_text(text)
+
+    if not raw_href:
+        return False, ""
+
+    lowered_href = raw_href.lower()
+    lowered_text = raw_text.casefold()
+
+    if lowered_href.startswith("#"):
+        return False, ""
+    if any(token in lowered_href for token in BAD_LINK_HREF_SUBSTRINGS):
+        return False, ""
+    if not raw_text:
+        return False, ""
+    if len(raw_text) > 40:
+        return False, ""
+    if raw_text in BAD_LINK_TEXTS:
+        return False, ""
+    if any(token.casefold() in lowered_text for token in BAD_LINK_SUBSTRINGS):
+        return False, ""
+    if raw_text in BAD_NAME_WORDS:
+        return False, ""
+
+    full_url = urljoin(index_url, raw_href)
+    parsed = urlparse(full_url)
+    clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+
+    if parsed.netloc != "medicine.yonsei.ac.kr":
+        return False, ""
+    if not parsed.path.endswith(".do"):
+        return False, ""
+
+    allowed = (
+        parsed.path.startswith("/medicine/research/basic/")
+        or parsed.path.startswith("/medicine/about/professor/clinic/")
+        or parsed.path.startswith("/medicine/about/professor/humanities/")
+    )
+    if not allowed:
+        return False, ""
+
+    banned_path_bits = [
+        "/intro/", "/news/", "/board/", "/campus/", "/student/",
+        "/admission/", "/support/",
+    ]
+    if any(bit in parsed.path for bit in banned_path_bits):
+        # 실제 교수/교실 페이지 경로는 허용
+        if not allowed:
+            return False, ""
+
+    return True, clean_url
+
+
+def _guess_department_name_from_url(page_url: str) -> str:
+    stem = Path(urlparse(page_url).path).stem
+    stem = stem.replace("-", " ").replace("_", " ").strip()
+    return stem or page_url
+
+
+def _is_department_like_url(page_url: str) -> bool:
+    path = urlparse(str(page_url or "")).path
+    return (
+        path.startswith("/medicine/research/basic/")
+        or path.startswith("/medicine/about/professor/clinic/")
+        or path.startswith("/medicine/about/professor/humanities/")
+    ) and path.endswith('.do')
+
+
 def _collect_department_links(page, index_url: str) -> dict[str, str]:
     links: dict[str, str] = {}
 
@@ -2770,38 +3054,25 @@ def _collect_department_links(page, index_url: str) -> dict[str, str]:
             a = anchors.nth(i)
             href = a.get_attribute("href") or ""
             text = re.sub(r"\s+", " ", a.inner_text() or "").strip()
-            full_url = urljoin(index_url, href)
-
-            if "medicine.yonsei.ac.kr" not in full_url:
-                continue
-
-            ok = (
-                "/medicine/about/professor/clinic/" in full_url
-                or "/medicine/about/professor/humanities/" in full_url
-                or "/medicine/research/basic/" in full_url
-            )
+            ok, clean_url = _is_valid_department_link(index_url, href, text)
             if not ok:
                 continue
 
-            if not text or len(text) > 40:
-                continue
-            if text in BAD_NAME_WORDS:
-                continue
-            if any(tok in text for tok in ["전체교실", "검색", "닫기", "TOP"]):
+            clean_text = _clean_department_text(text)
+            if any(tok in clean_text for tok in ["전체교실", "검색", "닫기", "홈페이지"]):
                 continue
 
-            links.setdefault(full_url, text)
+            links.setdefault(clean_url, clean_text)
         except Exception:
             continue
 
     return links
-
-
 def fetch_latest_yonsei_professors(
     *,
     logger: Callable[[str], None] | None = None,
     timeout_ms: int = 20000,
     debug_dir: str | Path | None = None,
+    group_filter: str = "전체",
 ) -> list[dict[str, str]]:
     def _log(msg: str) -> None:
         if logger:
@@ -2813,6 +3084,13 @@ def fetch_latest_yonsei_professors(
     index_link_count = 0
     dept_name_count = 0
 
+    group_urls = {
+        "기초의학": [u for u in YONSEI_MEDICINE_PROFESSOR_INDEX_URLS if "/medicine/research/basic/" in u],
+        "임상의학": [u for u in YONSEI_MEDICINE_PROFESSOR_INDEX_URLS if "/medicine/about/professor/clinic/" in u],
+        "인문의학": [u for u in YONSEI_MEDICINE_PROFESSOR_INDEX_URLS if "/medicine/about/professor/humanities/" in u],
+    }
+    target_index_urls = group_urls.get(group_filter, YONSEI_MEDICINE_PROFESSOR_INDEX_URLS)
+
     if debug_dir is None:
         debug_path = Path(__file__).resolve().parent / "_debug_yonsei"
     else:
@@ -2823,17 +3101,27 @@ def fetch_latest_yonsei_professors(
         context = browser.new_context()
         page = context.new_page()
 
-        for idx, index_url in enumerate(YONSEI_MEDICINE_PROFESSOR_INDEX_URLS, start=1):
+        for idx, index_url in enumerate(target_index_urls, start=1):
             try:
-                page.goto(index_url, wait_until="networkidle", timeout=timeout_ms)
-                page.wait_for_timeout(2000)
+                page.goto(index_url, wait_until="domcontentloaded", timeout=timeout_ms)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=min(5000, timeout_ms))
+                except Exception:
+                    pass
+                page.wait_for_timeout(1200)
                 _save_debug_page(page, debug_path, f"index_{idx}")
 
                 found = _collect_department_links(page, index_url)
+                if not found and _is_department_like_url(index_url):
+                    guessed_name = _guess_department_name_from_url(index_url)
+                    found = {index_url: guessed_name}
+                    _log(f"[YONSEI] 직접 교실 페이지로 처리: {guessed_name} | {index_url}")
+
                 index_link_count += len(found)
                 department_pages.update(found)
 
                 _log(f"[YONSEI] 인덱스 수집: {index_url} -> {len(found)}개 교실")
+                _log("[YONSEI] 유효 교실 링크만 필터링 완료")
                 for u, d in found.items():
                     _log(f"[YONSEI] 교실 링크: {d} | {u}")
 
@@ -2842,22 +3130,46 @@ def fetch_latest_yonsei_professors(
 
         if not department_pages:
             manual_pages = _load_manual_department_urls()
+            if group_filter == "기초의학":
+                manual_pages = {u: d for u, d in manual_pages.items() if "/medicine/research/basic/" in u}
+            elif group_filter == "임상의학":
+                manual_pages = {u: d for u, d in manual_pages.items() if "/medicine/about/professor/clinic/" in u}
+            elif group_filter == "인문의학":
+                manual_pages = {u: d for u, d in manual_pages.items() if "/medicine/about/professor/humanities/" in u}
             if manual_pages:
                 department_pages.update(manual_pages)
                 _log(f"[YONSEI] 자동수집 0건 -> 수동 시드 사용: {len(manual_pages)}개")
                 for u, d in manual_pages.items():
                     _log(f"[YONSEI] 수동 시드: {d} | {u}")
 
+        _log(f"[YONSEI] 교수명단 스캔 범위 축소: 구분={group_filter} | 교실 {len(department_pages)}개")
+
         for n, (page_url, dept_name) in enumerate(department_pages.items(), start=1):
             try:
-                page.goto(page_url, wait_until="networkidle", timeout=timeout_ms)
-                page.wait_for_timeout(2500)
+                page.goto(page_url, wait_until="domcontentloaded", timeout=timeout_ms)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=min(5000, timeout_ms))
+                except Exception:
+                    pass
+                page.wait_for_timeout(1200)
                 _save_debug_page(page, debug_path, f"dept_{n}_{dept_name}")
 
                 html = page.content()
                 names = _extract_names_from_rendered_html(html)
+                english_name_map = _extract_korean_english_name_pairs(html)
+                en_names = _fetch_english_professor_names_for_department(page, page_url, logger=_log)
+                matched_map = _match_korean_to_english_names(names, en_names)
 
-                _log(f"[YONSEI] {dept_name}: 이름 후보 {len(names)}명")
+                for ko_name, en_name in english_name_map.items():
+                    normalized_en = _normalize_english_professor_name(en_name)
+                    if normalized_en:
+                        matched_map[ko_name] = normalized_en
+
+                matched_count = sum(1 for v in matched_map.values() if v)
+                _log(
+                    f"[YONSEI] {dept_name}: 이름 후보 {len(names)}명"
+                    f" | 영문매칭 {matched_count}명"
+                )
 
                 if not names:
                     continue
@@ -2865,7 +3177,8 @@ def fetch_latest_yonsei_professors(
                 dept_name_count += len(names)
 
                 for name in names:
-                    query = _normalize_professor_name_for_query(name)
+                    english_name = _normalize_english_professor_name(matched_map.get(name, ""))
+                    query = english_name or _normalize_professor_name_for_query(name)
                     if not query:
                         continue
 
@@ -2950,6 +3263,7 @@ def categorize_yonsei_professor_group(source_url: str, department: str = "") -> 
 def export_latest_yonsei_professors_csv(
     output_csv: str | Path,
     *,
+    group_filter: str = "전체",
     logger: Callable[[str], None] | None = None,
 ) -> dict[str, int | str]:
     output_csv = Path(output_csv)
@@ -2958,25 +3272,34 @@ def export_latest_yonsei_professors_csv(
     rows = fetch_latest_yonsei_professors(
         logger=logger,
         debug_dir=debug_dir,
+        group_filter=group_filter,
     )
     validate_exported_rows(rows)
+
+    normalized_group_filter = str(group_filter or "전체").strip() or "전체"
+    valid_groups = {"전체", "기초의학", "임상의학", "인문의학"}
+    if normalized_group_filter not in valid_groups:
+        normalized_group_filter = "전체"
 
     output_csv.parent.mkdir(parents=True, exist_ok=True)
 
     normalized_rows: list[dict[str, str]] = []
     for row in rows:
-        normalized_rows.append({
-            "group": categorize_yonsei_professor_group(
-                row.get("source_url", ""),
-                row.get("department", ""),
-            ),
+        professor_group = categorize_yonsei_professor_group(
+            row.get("source_url", ""),
+            row.get("department", ""),
+        )
+        normalized_row = {
+            "group": professor_group,
             "name": row.get("name", ""),
             "query": row.get("query", ""),
             "department": row.get("department", ""),
             "affiliation": row.get("affiliation", ""),
             "source_url": row.get("source_url", ""),
             "orcid": row.get("orcid", ""),
-        })
+        }
+        if normalized_group_filter == "전체" or professor_group == normalized_group_filter:
+            normalized_rows.append(normalized_row)
 
     df = pd.DataFrame(normalized_rows, columns=[
         "group",
@@ -2990,12 +3313,15 @@ def export_latest_yonsei_professors_csv(
     df.to_csv(output_csv, index=False, encoding="utf-8-sig")
 
     if logger:
-        logger(f"[YONSEI] CSV 저장 완료: {output_csv} ({len(df)} rows)")
+        logger(
+            f"[YONSEI] CSV 저장 완료: {output_csv} | 구분={normalized_group_filter} | {len(df)} rows"
+        )
         logger(f"[YONSEI] 디버그 폴더: {debug_dir}")
 
     return {
         "rows": len(df),
         "professors": len(df),
+        "group": normalized_group_filter,
         "output_csv": str(output_csv),
     }
 
@@ -3575,3 +3901,273 @@ def export_professor_achievements_csv(
         'group_filter': normalized_group_filter,
         'output_csv': str(output_csv),
     }
+
+
+# === 2026-03-27 patch: tighter professor-name extraction and more robust English-page scraping ===
+BAD_NAME_WORDS = set(BAD_NAME_WORDS) | {
+    "교육", "분야", "생리", "생리학", "신경생리", "이메일", "줄기세포", "평활근",
+    "홈페이지", "화면인쇄", "화면축소", "화면확대", "면역학", "미생물학", "박사",
+    "발생학", "생물", "세포역학", "시작", "신경과학", "전문의", "정신의학",
+    "교수", "부교수", "조교수", "임상교수", "임상부교수", "임상조교수",
+    "중계교수", "중견교수", "직위", "전공", "연구실", "연구분야", "학력", "경력",
+    "전화", "연락처", "위치", "소개", "논문", "더보기", "목록", "상세", "프로필",
+}
+
+BAD_NAME_SUBSTRINGS = list(dict.fromkeys(BAD_NAME_SUBSTRINGS + [
+    "이메일", "homepage", "home page", "연구분야", "세부전공", "전화", "연락처",
+    "교육", "화면인쇄", "화면확대", "화면축소", "교실", "school of", "professor staff",
+]))
+
+PROF_SECTION_HINTS = [
+    "prof", "faculty", "staff", "member", "doctor", "people", "teacher", "lab", "researcher",
+    "교수", "연구원", "의사", "staff", "table", "list", "card", "profile",
+]
+
+ROLE_CONTEXT_WORDS = [
+    "교수", "부교수", "조교수", "임상교수", "임상부교수", "임상조교수", "Professor", "M.D.", "Ph.D.",
+]
+
+
+def _looks_like_professor_name(text: str) -> bool:
+    value = _normalize_professor_name(text)
+    if not value:
+        return False
+
+    if len(value) < 2 or len(value) > 12:
+        return False
+
+    if value in BAD_NAME_WORDS:
+        return False
+
+    lowered = value.casefold()
+    if any(token.casefold() in lowered for token in BAD_NAME_SUBSTRINGS):
+        return False
+
+    if re.search(r"\d", value):
+        return False
+
+    if re.search(r"[A-Za-z]", value) and not re.fullmatch(r"[A-Z][a-zA-Z'\-]+(?: [A-Z][a-zA-Z'\-]+){1,3}", value):
+        return False
+
+    if re.fullmatch(r"[가-힣]{2,4}", value):
+        if value.endswith(("학", "과", "실", "부", "연구", "교육")):
+            return False
+        return True
+
+    if re.fullmatch(r"[가-힣]{1,3}\s[가-힣]{1,3}", value):
+        return True
+
+    if re.fullmatch(r"[A-Z][a-zA-Z'\-]+(?: [A-Z][a-zA-Z'\-]+){1,3}", value):
+        return True
+    if re.fullmatch(r"[A-Z]\.\s?[A-Z][a-zA-Z'\-]+", value):
+        return True
+
+    return False
+
+
+def _node_has_professor_context(node) -> bool:
+    try:
+        attrs = " ".join([
+            node.get("id", "") or "",
+            " ".join(node.get("class", []) or []),
+        ]).casefold()
+    except Exception:
+        attrs = ""
+
+    text = re.sub(r"\s+", " ", node.get_text(" ", strip=True)).strip()
+    lowered = text.casefold()
+
+    if any(h in attrs for h in PROF_SECTION_HINTS):
+        return True
+    if any(h in lowered for h in ["교수", "부교수", "조교수", "이메일", "homepage", "professor", "staff"]):
+        return True
+    return False
+
+
+def _extract_names_from_node_text(text: str) -> list[str]:
+    if not text:
+        return []
+    parts = [part.strip() for part in re.split(r"[|/,\n]|\s{2,}", text) if part.strip()]
+    candidates = []
+    for part in parts:
+        normalized = _normalize_professor_name(part)
+        if _looks_like_professor_name(normalized):
+            candidates.append(normalized)
+            continue
+        if any(ctx in part for ctx in ROLE_CONTEXT_WORDS) or any(ctx in part for ctx in ["이메일", "홈페이지"]):
+            candidates.extend(_extract_korean_name_candidates(part))
+    deduped = []
+    seen = set()
+    for name in candidates:
+        if name not in seen:
+            seen.add(name)
+            deduped.append(name)
+    return deduped
+
+
+def _extract_names_from_rendered_html(html: str) -> list[str]:
+    soup = BeautifulSoup(html or "", "html.parser")
+    soup = _remove_layout_noise(soup)
+
+    focused_nodes = []
+    for node in soup.find_all(["div", "li", "tr", "dl", "section", "article", "td", "p"]):
+        text = re.sub(r"\s+", " ", node.get_text(" ", strip=True)).strip()
+        if not text or len(text) > 300:
+            continue
+        if _node_has_professor_context(node):
+            focused_nodes.append(text)
+
+    text_nodes = focused_nodes
+    if not text_nodes:
+        for node in soup.select("strong, b, dt, dd, li, td, p, h3, h4, h5, span, a"):
+            text = node.get_text(" ", strip=True)
+            if not text or len(text) > 80:
+                continue
+            text_nodes.append(text)
+
+    candidates = []
+    for text in text_nodes:
+        candidates.extend(_extract_names_from_node_text(text))
+
+    deduped = []
+    seen = set()
+    for name in candidates:
+        key = name.casefold()
+        if key not in seen:
+            seen.add(key)
+            deduped.append(name)
+    return deduped
+
+
+def _looks_like_english_name(text: str) -> bool:
+    value = _normalize_en_name(text)
+    if not value:
+        return False
+    parts = value.split()
+    if len(parts) < 2 or len(parts) > 4:
+        return False
+    for p in parts:
+        low = p.lower()
+        if len(p) < 2:
+            return False
+        if low in EN_BAD_WORDS:
+            return False
+        if not re.fullmatch(r"[A-Z][a-zA-Z\-]*", p):
+            return False
+    surname_like = {x for vals in KOREAN_SURNAME_TO_EN.values() for x in vals}
+    if parts[-1].lower() not in surname_like and parts[0].lower() not in surname_like and len(parts) > 3:
+        return False
+    return True
+
+
+def _extract_english_names_from_rendered_html(html: str) -> list[str]:
+    soup = BeautifulSoup(html or "", "html.parser")
+    soup = _remove_layout_noise(soup)
+    texts = []
+    for node in soup.find_all(["div", "li", "tr", "dl", "section", "article", "td", "p", "span", "strong", "a"]):
+        text = re.sub(r"\s+", " ", node.get_text(" ", strip=True)).strip()
+        if not text or len(text) > 250:
+            continue
+        if _node_has_professor_context(node) or any(w in text for w in ["Professor", "M.D.", "Ph.D.", "E-mail", "Homepage"]):
+            texts.append(text)
+    if not texts:
+        texts.append(re.sub(r"\s+", " ", soup.get_text(" ", strip=True)))
+
+    collected = []
+    for text in texts:
+        collected.extend(_extract_english_names_from_text(text))
+
+    deduped = []
+    seen = set()
+    for name in collected:
+        key = name.casefold()
+        if key not in seen:
+            seen.add(key)
+            deduped.append(name)
+    return deduped
+
+
+def _find_professor_staff_url(page, base_url: str) -> str:
+    candidates = [
+        "a:has-text('Professor Staff')",
+        "a:has-text('Professor')",
+        "button:has-text('Professor Staff')",
+        "button:has-text('Professor')",
+        "text=Professor Staff",
+    ]
+    for selector in candidates:
+        try:
+            loc = page.locator(selector).first
+            if loc.count() > 0:
+                href = loc.get_attribute('href') or ''
+                if href:
+                    return urljoin(base_url, href)
+        except Exception:
+            continue
+    try:
+        anchors = page.locator('a')
+        count = min(anchors.count(), 400)
+    except Exception:
+        return base_url
+    for i in range(count):
+        try:
+            a = anchors.nth(i)
+            href = a.get_attribute('href') or ''
+            text = re.sub(r'\s+', ' ', a.inner_text() or '').strip().casefold()
+            if 'professor staff' in text or text == 'professor':
+                return urljoin(base_url, href)
+        except Exception:
+            continue
+    return base_url
+
+
+def _try_open_professor_staff_tab(page) -> None:
+    selectors = [
+        "a:has-text('Professor Staff')",
+        "button:has-text('Professor Staff')",
+        "a:has-text('Professor')",
+        "button:has-text('Professor')",
+        "text=Professor Staff",
+    ]
+    for selector in selectors:
+        try:
+            loc = page.locator(selector).first
+            if loc.count() > 0:
+                loc.click(timeout=3000)
+                page.wait_for_timeout(1200)
+                return
+        except Exception:
+            continue
+
+
+def _fetch_english_professor_names_for_department(page, ko_department_url: str, logger: Callable[[str], None] | None = None) -> list[str]:
+    log = logger or (lambda _msg: None)
+    en_url = ko_to_en_department_url(ko_department_url)
+    if not en_url:
+        return []
+    try:
+        page.goto(en_url, wait_until='domcontentloaded', timeout=20000)
+        page.wait_for_timeout(1500)
+        professor_url = _find_professor_staff_url(page, en_url)
+        if professor_url and professor_url != en_url:
+            page.goto(professor_url, wait_until='domcontentloaded', timeout=20000)
+            page.wait_for_timeout(1500)
+        _try_open_professor_staff_tab(page)
+        html = page.content()
+        names = _extract_english_names_from_rendered_html(html)
+        if not names:
+            for selector in ['#tab-content1', '.tab-content', '.professor', '.faculty', '.staff', '.member']:
+                try:
+                    loc = page.locator(selector)
+                    if loc.count() > 0:
+                        snippet = ' '.join([loc.nth(i).inner_text() for i in range(min(loc.count(), 5))])
+                        names = _extract_english_names_from_text(snippet)
+                        if names:
+                            break
+                except Exception:
+                    continue
+        log(f"[YONSEI-EN] 영문 교수명 후보 {len(names)}명 | {professor_url or en_url}")
+        return names
+    except Exception as exc:
+        log(f"[YONSEI-EN-WARN] 영문 페이지 수집 실패: {en_url} | {exc}")
+        return []
