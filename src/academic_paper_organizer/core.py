@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import re
 import shutil
@@ -61,6 +62,82 @@ class PaperRow:
     doc_type: str
     doc_score: str
     doc_reasons_json: str
+    scie: str = ""
+    impact_factor: str = ""
+
+
+def load_journal_metrics(csv_path: str | Path = "journal_metrics.csv") -> dict[str, tuple[str, str]]:
+    data: dict[str, tuple[str, str]] = {}
+    try:
+        path = Path(csv_path)
+        if not path.is_absolute():
+            path = Path(__file__).resolve().parent / path
+        with path.open("r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                name = str(row.get("Journal Name", "")).strip()
+                if not name:
+                    continue
+                data[name.casefold()] = (
+                    str(row.get("SCIE", "")).strip(),
+                    str(row.get("Impact Factor", "")).strip(),
+                )
+    except Exception:
+        return {}
+    return data
+
+
+JOURNAL_DB = load_journal_metrics()
+
+
+def fetch_openalex_journal_metrics(venue: str) -> tuple[str, str]:
+    venue = str(venue or "").strip()
+    if not venue:
+        return "", ""
+
+    try:
+        res = requests.get(
+            "https://api.openalex.org/sources",
+            params={"search": venue, "per-page": 1},
+            timeout=8,
+        )
+        res.raise_for_status()
+        payload = res.json() or {}
+        results = payload.get("results") or []
+        if not results:
+            return "", ""
+
+        item = results[0] or {}
+        is_in_doaj = bool(item.get("is_in_doaj"))
+        is_oa = bool(item.get("is_oa"))
+        summary_stats = item.get("summary_stats") or {}
+        cited_half_life = summary_stats.get("2yr_mean_citedness")
+        works_count = item.get("works_count") or 0
+        cited_by_count = item.get("cited_by_count") or 0
+
+        scie = "SCIE" if (works_count or cited_by_count or is_in_doaj or is_oa) else "Unknown"
+        if cited_half_life not in (None, ""):
+            impact = f"OA:{float(cited_half_life):.2f}"
+        elif cited_by_count:
+            impact = f"OA-CITES:{round(float(cited_by_count) / 1000.0, 2):.2f}"
+        else:
+            impact = ""
+
+        return scie, impact
+    except Exception:
+        return "", ""
+
+
+def fetch_journal_metrics(venue: str) -> tuple[str, str]:
+    venue = str(venue or "").strip()
+    if not venue:
+        return "", ""
+
+    key = venue.casefold()
+    if key in JOURNAL_DB:
+        return JOURNAL_DB[key]
+
+    return fetch_openalex_journal_metrics(venue)
 
 
 def _current_year() -> int:
@@ -268,6 +345,8 @@ class PaperIndex:
                 doc_type TEXT,
                 doc_score TEXT,
                 doc_reasons_json TEXT,
+                scie TEXT,
+                impact_factor TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
             """
@@ -276,6 +355,7 @@ class PaperIndex:
         self._ensure_original_path_column()
         self._ensure_authors_json_column()
         self._ensure_doc_type_columns()
+        self._ensure_journal_metric_columns()
         self._ensure_crossref_cache_table()
 
     def _ensure_original_path_column(self) -> None:
@@ -305,6 +385,18 @@ class PaperIndex:
             cur.execute("ALTER TABLE papers ADD COLUMN doc_score TEXT")
         if "doc_reasons_json" not in columns:
             cur.execute("ALTER TABLE papers ADD COLUMN doc_reasons_json TEXT")
+
+        self.conn.commit()
+
+    def _ensure_journal_metric_columns(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute("PRAGMA table_info(papers)")
+        columns = [row[1] for row in cur.fetchall()]
+
+        if "scie" not in columns:
+            cur.execute("ALTER TABLE papers ADD COLUMN scie TEXT")
+        if "impact_factor" not in columns:
+            cur.execute("ALTER TABLE papers ADD COLUMN impact_factor TEXT")
 
         self.conn.commit()
 
@@ -375,15 +467,20 @@ class PaperIndex:
         doc_type: str,
         doc_score: str,
         doc_reasons_json: str,
+        scie: str = "",
+        impact_factor: str = "",
     ) -> None:
         safe_year = normalize_year(year)
+        if not scie and not impact_factor:
+            scie, impact_factor = fetch_journal_metrics(venue)
         cur = self.conn.cursor()
         cur.execute(
             """
             INSERT INTO papers (
                 field_code, year, first_author, authors_json, venue, title, doi,
-                path, original_path, snippet, doc_type, doc_score, doc_reasons_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                path, original_path, snippet, doc_type, doc_score, doc_reasons_json,
+                scie, impact_factor
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 field_code,
@@ -399,6 +496,8 @@ class PaperIndex:
                 doc_type,
                 doc_score,
                 doc_reasons_json,
+                scie,
+                impact_factor,
             ),
         )
         self.conn.commit()
@@ -434,7 +533,9 @@ class PaperIndex:
                 snippet,
                 COALESCE(doc_type, 'unknown') AS doc_type,
                 COALESCE(doc_score, '') AS doc_score,
-                COALESCE(doc_reasons_json, '[]') AS doc_reasons_json
+                COALESCE(doc_reasons_json, '[]') AS doc_reasons_json,
+                COALESCE(scie, '') AS scie,
+                COALESCE(impact_factor, '') AS impact_factor
             FROM papers
             WHERE 1=1
         """
@@ -501,6 +602,8 @@ class PaperIndex:
                 doc_type=row["doc_type"] or "unknown",
                 doc_score=row["doc_score"] or "",
                 doc_reasons_json=row["doc_reasons_json"] or "[]",
+                scie=row["scie"] or "",
+                impact_factor=row["impact_factor"] or "",
             )
             for row in rows
         ]
@@ -1045,6 +1148,19 @@ def build_pubmed_search_url(title: str) -> str:
 
 def build_pubmed_article_url(pmid: str) -> str:
     return f"https://pubmed.ncbi.nlm.nih.gov/{str(pmid).strip()}/"
+
+def sanitize_journal_title(title: str) -> str:
+    cleaned = re.sub(r"<[^>]+>", "", title or "")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def build_yonsei_journal_service_urls() -> dict[str, str]:
+    return {
+        "landing": "https://ymlib.yonsei.ac.kr/research-support/research-achievement/journal-analysis-service/",
+        "scie": "https://openlink.ymlproxy.yonsei.ac.kr/link.n2s?url=https%3A%2F%2Fs2journal.bwise.kr%2Fjrnl%2FjrnlList.do%3Fmenu%3D1",
+        "impact_factor": "https://openlink.ymlproxy.yonsei.ac.kr/link.n2s?url=https%3A%2F%2Fs2journal.bwise.kr%2Fjcr%2FjcrCategoryRankingPage.do",
+    }
 
 
 def search_pubmed_by_title(

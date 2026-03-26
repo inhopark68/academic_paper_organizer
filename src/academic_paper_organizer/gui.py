@@ -4,7 +4,6 @@ import csv
 import json
 import os
 import queue
-import re
 import shutil
 import subprocess
 import sys
@@ -151,6 +150,8 @@ class FilteringEventHandler(FileSystemEventHandler):
 class OrganizerGUI:
     COLUMNS = (
         "doc_type",
+        "scie",
+        "impact_factor",
         "field",
         "year",
         "author",
@@ -1237,6 +1238,8 @@ class OrganizerGUI:
 
         self.base_headings = {
             "doc_type": "문서유형",
+            "scie": "SCIE",
+            "impact_factor": "Impact Factor",
             "field": "분야",
             "year": "연도",
             "author": "저자",
@@ -1248,10 +1251,12 @@ class OrganizerGUI:
         }
         widths = {
             "doc_type": 90,
+            "scie": 90,
+            "impact_factor": 110,
             "field": 70,
             "year": 70,
             "author": 110,
-            "venue": 160,
+            "venue": 180,
             "title": 340,
             "doi": 180,
             "path": 280,
@@ -2088,6 +2093,8 @@ class OrganizerGUI:
                 text="☐",
                 values=(
                     getattr(row, "doc_type", "unknown"),
+                    getattr(row, "scie", ""),
+                    getattr(row, "impact_factor", ""),
                     row.field_code,
                     row.year,
                     row.first_author,
@@ -2589,9 +2596,8 @@ class OrganizerGUI:
             result = search_pubmed_by_title(title, email=email)
             url = result.get("url", "").strip()
             if not url:
-                cleaned_title = re.sub(r"<[^>]+>", "", title or "")
-                cleaned_title = re.sub(r"\s+", " ", cleaned_title).strip()
-                url = f"https://pubmed.ncbi.nlm.nih.gov/?term={quote_plus(cleaned_title)}&sort=jour&sort_order=asc"
+                search_term = f'"{title}"[Title]'
+                url = f"https://pubmed.ncbi.nlm.nih.gov/?term={quote_plus(search_term)}"
 
             try:
                 webbrowser.open(url)
