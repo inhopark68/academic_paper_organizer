@@ -416,6 +416,7 @@ class PaperIndex:
         field_code: str | None = None,
         venue: str | None = None,
         doc_type: str | None = None,
+        file_path: str | None = None,
         limit: int = 50,
     ) -> list[PaperRow]:
         sql = """
@@ -463,6 +464,19 @@ class PaperIndex:
         if doc_type:
             sql += " AND COALESCE(doc_type, 'unknown') = ?"
             params.append(doc_type)
+
+        if file_path:
+            normalized_path = str(Path(file_path))
+            file_name = Path(normalized_path).name
+            sql += (
+                " AND (path = ? OR original_path = ? OR path LIKE ? OR original_path LIKE ?)"
+            )
+            params.extend([
+                normalized_path,
+                normalized_path,
+                f"%{file_name}%",
+                f"%{file_name}%",
+            ])
 
         sql += " ORDER BY year DESC, title ASC LIMIT ?"
         params.append(limit)

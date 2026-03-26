@@ -176,6 +176,7 @@ class OrganizerGUI:
         self.venue_var = tk.StringVar(value=self.app_config.venue)
         self.doc_type_var = tk.StringVar(value=self.app_config.doc_type)
         self.limit_var = tk.StringVar(value=self.app_config.limit)
+        self.search_file_var = tk.StringVar(value="")
 
         self.crossref_email_var = tk.StringVar(value=self.app_config.crossref_mailto)
         self.crossref_cache_days_var = tk.StringVar(
@@ -216,6 +217,7 @@ class OrganizerGUI:
         self.snippets: dict[str, str] = {}
         self.sort_state: dict[str, bool] = {}
         self.current_sort_column: str | None = None
+        self.checked_items: set[str] = set()
 
         self.use_boxed_widgets = True
 
@@ -679,7 +681,17 @@ class OrganizerGUI:
         outer = ttk.Frame(self.root, padding=10)
         outer.pack(fill="both", expand=True)
 
-        top = ttk.LabelFrame(outer, text="기본 설정", padding=10)
+        notebook = ttk.Notebook(outer)
+        notebook.pack(fill="both", expand=True)
+
+        settings_tab = ttk.Frame(notebook, padding=10)
+        search_tab = ttk.Frame(notebook, padding=10)
+        log_tab = ttk.Frame(notebook, padding=10)
+        notebook.add(settings_tab, text="기본 설정")
+        notebook.add(search_tab, text="검색")
+        notebook.add(log_tab, text="로그")
+
+        top = ttk.LabelFrame(settings_tab, text="기본 설정", padding=10)
         top.pack(fill="x")
         top.columnconfigure(1, weight=1)
         top.columnconfigure(4, weight=1)
@@ -769,208 +781,160 @@ class OrganizerGUI:
             sticky="ns",
         )
 
-        controls = ttk.Frame(top)
-        controls.grid(row=2, column=0, columnspan=6, sticky="ew", pady=(10, 0))
+        controls_box = ttk.LabelFrame(settings_tab, text="실행 / 관리", padding=10)
+        controls_box.pack(fill="x", pady=(10, 0))
 
-        for i in range(10):
-            controls.columnconfigure(i, weight=0)
-        controls.columnconfigure(10, weight=1)
+        controls_row1 = ttk.Frame(controls_box)
+        controls_row1.pack(fill="x")
+        controls_row2 = ttk.Frame(controls_box)
+        controls_row2.pack(fill="x", pady=(6, 0))
 
-        self.run_once_btn = self._grid_button(
-            controls,
+        self.run_once_btn = self._pack_button(
+            controls_row1,
             text="1회 처리",
             command=self.run_once,
             style_name="Blue.TButton",
             width=12,
-            row=0,
-            column=0,
-            sticky="w",
+            side="left",
             padx=4,
             pady=4,
         )
-
-        self.start_watch_btn = self._grid_button(
-            controls,
+        self.start_watch_btn = self._pack_button(
+            controls_row1,
             text="감시 시작",
             command=self.start_watch,
             style_name="Green.TButton",
             width=12,
-            row=0,
-            column=1,
-            sticky="w",
+            side="left",
             padx=4,
             pady=4,
         )
-
-        self.stop_watch_btn = self._grid_button(
-            controls,
+        self.stop_watch_btn = self._pack_button(
+            controls_row1,
             text="감시 중지",
             command=self.stop_watch,
             style_name="Orange.TButton",
             width=12,
-            row=0,
-            column=2,
-            sticky="w",
+            side="left",
             padx=4,
             pady=4,
         )
-
-        self.cancel_btn = self._grid_button(
-            controls,
+        self.cancel_btn = self._pack_button(
+            controls_row1,
             text="작업 취소",
             command=self.cancel_current_task,
             style_name="Red.TButton",
             width=12,
-            row=0,
-            column=3,
-            sticky="w",
+            side="left",
             padx=4,
             pady=4,
         )
-
-        self.pause_btn = self._grid_button(
-            controls,
+        self.pause_btn = self._pack_button(
+            controls_row1,
             text="작업 정지",
             command=self.pause_current_task,
             style_name="Orange.TButton",
             width=12,
-            row=0,
-            column=4,
-            sticky="w",
+            side="left",
             padx=4,
             pady=4,
         )
-
-        self.resume_btn = self._grid_button(
-            controls,
+        self.resume_btn = self._pack_button(
+            controls_row1,
             text="작업 재시작",
             command=self.resume_current_task,
             style_name="Green.TButton",
             width=12,
-            row=0,
-            column=5,
-            sticky="w",
+            side="left",
             padx=4,
             pady=4,
         )
 
-        self.reindex_btn = self._grid_button(
-            controls,
+        self.reindex_btn = self._pack_button(
+            controls_row2,
             text="연도보정+재인덱싱",
             command=self.reindex,
             style_name="Blue.TButton",
             width=18,
-            row=0,
-            column=6,
-            sticky="w",
+            side="left",
             padx=4,
             pady=4,
         )
-
-        self.reparse_btn = self._grid_button(
-            controls,
+        self.reparse_btn = self._pack_button(
+            controls_row2,
             text="전체 재파싱(빠름)",
             command=self.reparse_all,
             style_name="Green.TButton",
             width=16,
-            row=0,
-            column=7,
-            sticky="w",
+            side="left",
             padx=4,
             pady=4,
         )
-
-        self._grid_button(
-            controls,
+        self._pack_button(
+            controls_row2,
             text="캐시 삭제",
             command=self.clear_crossref_cache,
             style_name="Orange.TButton",
             width=12,
-            row=0,
-            column=8,
-            sticky="w",
+            side="left",
             padx=4,
             pady=4,
         )
-
-        self._grid_button(
-            controls,
+        self._pack_button(
+            controls_row2,
             text="DB 폴더 열기",
             command=self.open_db_folder,
             style_name="Soft.TButton",
             width=12,
-            row=0,
-            column=9,
-            sticky="w",
+            side="left",
             padx=4,
             pady=4,
         )
-
-        self._grid_button(
-            controls,
+        self._pack_button(
+            controls_row2,
             text="출력 폴더 열기",
             command=self.open_output_folder,
             style_name="Soft.TButton",
             width=14,
-            row=0,
-            column=8,
-            sticky="w",
+            side="left",
             padx=4,
             pady=4,
         )
 
+        status_box = ttk.LabelFrame(settings_tab, text="상태", padding=10)
+        status_box.pack(fill="x", pady=(10, 0))
+
         ttk.Label(
-            controls,
+            status_box,
             textvariable=self.status_var,
             anchor="w",
-        ).grid(
-            row=1,
-            column=0,
-            columnspan=10,
-            sticky="ew",
-            padx=4,
-            pady=(8, 2),
-        )
+        ).pack(fill="x", padx=4, pady=(0, 4))
 
         ttk.Label(
-            controls,
+            status_box,
             textvariable=self.progress_var,
             anchor="w",
-        ).grid(
-            row=2,
-            column=0,
-            columnspan=10,
-            sticky="ew",
-            padx=4,
-            pady=(2, 2),
-        )
+        ).pack(fill="x", padx=4, pady=4)
 
         ttk.Label(
-            controls,
+            status_box,
             textvariable=self.scan_counter_var,
             anchor="w",
-        ).grid(
-            row=3,
-            column=0,
-            columnspan=10,
-            sticky="ew",
-            padx=4,
-            pady=(2, 2),
-        )
+        ).pack(fill="x", padx=4, pady=(4, 0))
 
-        options_frame = ttk.Frame(top)
-        options_frame.grid(row=3, column=0, columnspan=6, sticky="ew", pady=(8, 0))
-        options_frame.columnconfigure(4, weight=1)
+        options_box = ttk.LabelFrame(settings_tab, text="감시 옵션", padding=10)
+        options_box.pack(fill="x", pady=(10, 0))
+        options_box.columnconfigure(4, weight=1)
 
         ttk.Checkbutton(
-            options_frame,
+            options_box,
             text="하위 폴더까지 포함",
             variable=self.recursive_var,
             command=self._on_watch_option_changed,
         ).grid(row=0, column=0, sticky="w", padx=(0, 12))
 
         ttk.Radiobutton(
-            options_frame,
+            options_box,
             text="전체 감시",
             variable=self.watch_mode_var,
             value="all",
@@ -978,7 +942,7 @@ class OrganizerGUI:
         ).grid(row=0, column=1, sticky="w", padx=(0, 8))
 
         ttk.Radiobutton(
-            options_frame,
+            options_box,
             text="선택한 하위 폴더만 감시",
             variable=self.watch_mode_var,
             value="selected",
@@ -986,7 +950,7 @@ class OrganizerGUI:
         ).grid(row=0, column=2, sticky="w", padx=(0, 8))
 
         self.select_subdirs_btn = self._grid_button(
-            options_frame,
+            options_box,
             text="하위 폴더 선택",
             command=self.pick_subdirs,
             style_name="Soft.TButton",
@@ -998,17 +962,9 @@ class OrganizerGUI:
             pady=0,
         )
 
-        ttk.Label(options_frame, textvariable=self.selected_subdirs_label_var).grid(
+        ttk.Label(options_box, textvariable=self.selected_subdirs_label_var).grid(
             row=0, column=4, sticky="ew"
         )
-
-        notebook = ttk.Notebook(outer)
-        notebook.pack(fill="both", expand=True, pady=(10, 0))
-
-        search_tab = ttk.Frame(notebook, padding=10)
-        log_tab = ttk.Frame(notebook, padding=10)
-        notebook.add(search_tab, text="검색")
-        notebook.add(log_tab, text="로그")
 
         self._build_search_tab(search_tab)
         self._build_log_tab(log_tab)
@@ -1219,6 +1175,15 @@ class OrganizerGUI:
         )
         self._pack_button(
             action_row_bottom,
+            text="선택 파일 지우기",
+            command=self.delete_checked_files,
+            style_name="Red.TButton",
+            width=14,
+            side="left",
+            padx=6,
+        )
+        self._pack_button(
+            action_row_bottom,
             text="선택 파일 ZIP",
             command=self.export_selected_zip,
             style_name="Orange.TButton",
@@ -1240,7 +1205,7 @@ class OrganizerGUI:
             text="검색 결과 전체 CSV 저장",
             command=self.export_all_results_csv,
             style_name="Soft.TButton",
-            width=18,
+            width=22,
             side="left",
             padx=6,
         )
@@ -1251,10 +1216,12 @@ class OrganizerGUI:
         self.tree = ttk.Treeview(
             tree_frame,
             columns=self.COLUMNS,
-            show="headings",
+            show="tree headings",
             height=18,
             selectmode="extended",
         )
+        self.tree.heading("#0", text="선택")
+        self.tree.column("#0", width=64, minwidth=56, anchor="center", stretch=False)
 
         self.base_headings = {
             "doc_type": "문서유형",
@@ -1307,6 +1274,8 @@ class OrganizerGUI:
         self.tree.pack(side="left", fill="both", expand=True)
         self.tree.bind("<Double-1>", self._on_tree_double_click)
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
+        self.tree.bind("<Button-1>", self._on_tree_click, add="+")
+        self.tree.bind("<space>", self._toggle_checked_for_selection)
 
         snippet_box = ttk.LabelFrame(parent, text="미리보기", padding=8)
         snippet_box.pack(fill="both", expand=False, pady=(8, 0))
@@ -1344,6 +1313,30 @@ class OrganizerGUI:
 
         for row in rows:
             doc_type = getattr(row, "doc_type", "unknown") or "unknown"
+            if doc_type == "academic":
+                academic += 1
+            elif doc_type == "non_academic":
+                non_academic += 1
+            else:
+                unknown += 1
+
+        self.result_count_var.set(f"검색 결과: {total}건")
+        self.academic_count_var.set(f"학술 논문: {academic}건")
+        self.non_academic_count_var.set(f"비학술 문서: {non_academic}건")
+        self.unknown_count_var.set(f"미분류: {unknown}건")
+
+    def _refresh_dashboard_from_tree(self) -> None:
+        total = 0
+        academic = 0
+        non_academic = 0
+        unknown = 0
+
+        for item_id in self.tree.get_children():
+            values = self.tree.item(item_id, "values")
+            if not values:
+                continue
+            total += 1
+            doc_type = str(values[0]).strip() if len(values) > 0 else "unknown"
             if doc_type == "academic":
                 academic += 1
             elif doc_type == "non_academic":
@@ -2024,6 +2017,7 @@ class OrganizerGUI:
             self.tree.delete(item)
         self._reset_search_dashboard()
 
+
     def clear_filters(self) -> None:
         self.keyword_var.set("")
         self.author_var.set("")
@@ -2079,6 +2073,7 @@ class OrganizerGUI:
             item_id = self.tree.insert(
                 "",
                 "end",
+                text="☐",
                 values=(
                     getattr(row, "doc_type", "unknown"),
                     row.field_code,
@@ -2120,6 +2115,43 @@ class OrganizerGUI:
         values = self.tree.item(selected[0], "values")
         return values or None
 
+    def _set_item_checked(self, item_id: str, checked: bool) -> None:
+        if checked:
+            self.checked_items.add(item_id)
+            self.tree.item(item_id, text="☑")
+        else:
+            self.checked_items.discard(item_id)
+            self.tree.item(item_id, text="☐")
+
+    def _toggle_item_checked(self, item_id: str) -> None:
+        self._set_item_checked(item_id, item_id not in self.checked_items)
+
+    def _checked_item_ids(self) -> list[str]:
+        valid_items = set(self.tree.get_children())
+        stale = [item_id for item_id in self.checked_items if item_id not in valid_items]
+        for item_id in stale:
+            self.checked_items.discard(item_id)
+        return [item_id for item_id in self.tree.get_children() if item_id in self.checked_items]
+
+    def _on_tree_click(self, event) -> None:
+        region = self.tree.identify("region", event.x, event.y)
+        column = self.tree.identify_column(event.x)
+        item_id = self.tree.identify_row(event.y)
+
+        if region == "tree" and column == "#0" and item_id:
+            self._toggle_item_checked(item_id)
+            return "break"
+
+    def _toggle_checked_for_selection(self, event=None):
+        selected = list(self.tree.selection())
+        if not selected:
+            return "break"
+
+        should_check = any(item_id not in self.checked_items for item_id in selected)
+        for item_id in selected:
+            self._set_item_checked(item_id, should_check)
+        return "break"
+
     def _selected_path(self) -> Path | None:
         values = self._selected_values()
         if not values:
@@ -2143,7 +2175,7 @@ class OrganizerGUI:
         return doi or None
 
     def _selected_paths(self) -> list[Path]:
-        selected = self.tree.selection()
+        selected = self._checked_item_ids()
         results: list[Path] = []
 
         for item_id in selected:
@@ -2213,7 +2245,7 @@ class OrganizerGUI:
         paths = self._selected_paths()
         if not paths:
             messagebox.showinfo(
-                "안내", "먼저 검색 결과에서 하나 이상의 파일을 선택해 주세요."
+                "안내", "먼저 검색 결과 왼쪽 체크칸으로 하나 이상의 파일을 선택해 주세요."
             )
             return
 
@@ -2240,11 +2272,83 @@ class OrganizerGUI:
         self.set_status(f"선택 파일 모으기 완료: 성공 {copied}건, 실패 {failed}건")
         messagebox.showinfo("완료", f"파일 복사 완료\n성공: {copied}건\n실패: {failed}건")
 
-    def export_selected_zip(self) -> None:
-        selected = self.tree.selection()
+    def delete_checked_files(self) -> None:
+        selected = self._checked_item_ids()
         if not selected:
             messagebox.showinfo(
-                "안내", "먼저 검색 결과에서 하나 이상의 파일을 선택해 주세요."
+                "안내", "먼저 검색 결과 왼쪽 체크칸으로 하나 이상의 파일을 선택해 주세요."
+            )
+            return
+
+        confirmed = messagebox.askyesno(
+            "확인",
+            "체크한 정리본 파일과 DB 인덱스 항목을 삭제합니다.\n원본 파일은 삭제하지 않습니다.\n계속하시겠습니까?",
+        )
+        if not confirmed:
+            return
+
+        output = self.output_var.get().strip()
+        if not output:
+            messagebox.showwarning("경고", "출력 폴더를 지정해 주세요.")
+            return
+
+        db_path = Path(output).expanduser().resolve() / "LOG" / "paper_index.sqlite3"
+        if not db_path.exists():
+            messagebox.showwarning("경고", "검색 인덱스가 없습니다.")
+            return
+
+        deleted = 0
+        failed = 0
+
+        index = PaperIndex(db_path)
+        try:
+            for item_id in selected:
+                values = self.tree.item(item_id, "values")
+                if not values:
+                    continue
+
+                stored_path = Path(str(values[7]).strip()) if len(values) > 7 and str(values[7]).strip() else None
+                original_path = str(values[8]).strip() if len(values) > 8 else ""
+
+                try:
+                    if stored_path and stored_path.exists() and stored_path.is_file():
+                        stored_path.unlink()
+
+                    if original_path:
+                        index.delete_by_original_path(original_path)
+                    elif stored_path is not None:
+                        cur = index.conn.cursor()
+                        cur.execute("DELETE FROM papers WHERE path = ?", (str(stored_path),))
+                        index.conn.commit()
+
+                    self.tree.delete(item_id)
+                    self.snippets.pop(item_id, None)
+                    self.checked_items.discard(item_id)
+                    deleted += 1
+                except Exception as exc:
+                    failed += 1
+                    self.append_log(f"[WARN] 선택 파일 삭제 실패: {stored_path} | {exc}")
+        finally:
+            index.close()
+
+        self._refresh_dashboard_from_tree()
+        if self.tree.get_children():
+            first = self.tree.get_children()[0]
+            self.tree.selection_set(first)
+            self.tree.focus(first)
+            self._on_tree_select(None)
+        else:
+            self._set_text_widget(self.snippet_text, "")
+
+        self.append_log(f"[GUI] 선택 파일 지우기 완료: 성공 {deleted}건, 실패 {failed}건")
+        self.set_status(f"선택 파일 지우기 완료: 성공 {deleted}건, 실패 {failed}건")
+        messagebox.showinfo("완료", f"선택 파일 삭제 완료\n성공: {deleted}건\n실패: {failed}건")
+
+    def export_selected_zip(self) -> None:
+        selected = self._checked_item_ids()
+        if not selected:
+            messagebox.showinfo(
+                "안내", "먼저 검색 결과 왼쪽 체크칸으로 하나 이상의 파일을 선택해 주세요."
             )
             return
 
@@ -2357,10 +2461,10 @@ class OrganizerGUI:
             self.show_error("오류", f"CSV 저장에 실패했습니다:\n{exc}")
 
     def export_selected_csv(self) -> None:
-        selected = list(self.tree.selection())
+        selected = self._checked_item_ids()
         if not selected:
             messagebox.showinfo(
-                "안내", "먼저 검색 결과에서 하나 이상의 항목을 선택해 주세요."
+                "안내", "먼저 검색 결과 왼쪽 체크칸으로 하나 이상의 항목을 선택해 주세요."
             )
             return
 
