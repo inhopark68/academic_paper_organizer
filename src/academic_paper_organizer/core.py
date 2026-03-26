@@ -1025,16 +1025,22 @@ def build_snippet(text: str, max_length: int = 500) -> str:
         return compact
     return compact[: max_length - 3].rstrip() + "..."
 
+def sanitize_pubmed_title(title: str) -> str:
+    cleaned = re.sub(r"<[^>]+>", "", title or "")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
 def build_pubmed_search_term(title: str) -> str:
-    cleaned = re.sub(r"\s+", " ", title or "").strip()
+    cleaned = sanitize_pubmed_title(title)
     if not cleaned:
         return ""
     return f'"{cleaned}"[Title]'
 
 
 def build_pubmed_search_url(title: str) -> str:
-    term = build_pubmed_search_term(title)
-    return f"https://pubmed.ncbi.nlm.nih.gov/?term={quote_plus(term)}"
+    cleaned = sanitize_pubmed_title(title)
+    return f"https://pubmed.ncbi.nlm.nih.gov/?term={quote_plus(cleaned)}&sort=jour&sort_order=asc"
 
 
 def build_pubmed_article_url(pmid: str) -> str:
@@ -1048,7 +1054,7 @@ def search_pubmed_by_title(
     tool: str = "academic_paper_organizer",
     timeout: int = 15,
 ) -> dict[str, str]:
-    cleaned = re.sub(r"\s+", " ", title or "").strip()
+    cleaned = sanitize_pubmed_title(title)
     if not cleaned:
         return {
             "title": "",

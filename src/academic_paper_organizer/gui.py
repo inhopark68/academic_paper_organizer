@@ -4,6 +4,7 @@ import csv
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -2588,8 +2589,9 @@ class OrganizerGUI:
             result = search_pubmed_by_title(title, email=email)
             url = result.get("url", "").strip()
             if not url:
-                search_term = f'"{title}"[Title]'
-                url = f"https://pubmed.ncbi.nlm.nih.gov/?term={quote_plus(search_term)}"
+                cleaned_title = re.sub(r"<[^>]+>", "", title or "")
+                cleaned_title = re.sub(r"\s+", " ", cleaned_title).strip()
+                url = f"https://pubmed.ncbi.nlm.nih.gov/?term={quote_plus(cleaned_title)}&sort=jour&sort_order=asc"
 
             try:
                 webbrowser.open(url)
