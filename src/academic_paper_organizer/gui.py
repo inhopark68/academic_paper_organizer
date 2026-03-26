@@ -17,7 +17,7 @@ from pathlib import Path
 from urllib.parse import quote_plus
 
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
@@ -30,6 +30,8 @@ from .core import (
     repair_and_reindex,
     scan_existing_pdfs,
     search_pubmed_by_title,
+    export_professor_achievements_csv,
+    export_latest_yonsei_professors_csv,
 )
 try:
     from .core import scan_existing_pdfs_fast
@@ -152,6 +154,8 @@ class OrganizerGUI:
         "doc_type",
         "scie",
         "impact_factor",
+        "quartile",
+        "openalex_score",
         "field",
         "year",
         "author",
@@ -179,6 +183,9 @@ class OrganizerGUI:
         self.field_var = tk.StringVar(value=self.app_config.field)
         self.venue_var = tk.StringVar(value=self.app_config.venue)
         self.doc_type_var = tk.StringVar(value=self.app_config.doc_type)
+        self.scie_var = tk.StringVar(value="")
+        self.quartile_var = tk.StringVar(value="")
+        self.min_if_var = tk.StringVar(value="")
         self.limit_var = tk.StringVar(value=self.app_config.limit)
         self.search_file_var = tk.StringVar(value="")
 
@@ -195,6 +202,10 @@ class OrganizerGUI:
         self.academic_count_var = tk.StringVar(value="학술 논문: 0건")
         self.non_academic_count_var = tk.StringVar(value="비학술 문서: 0건")
         self.unknown_count_var = tk.StringVar(value="미분류: 0건")
+
+        self.prof_csv_path_var = tk.StringVar(value="불러온 교수성과 CSV 없음")
+        self.prof_count_var = tk.StringVar(value="교수 수: 0명")
+        self.prof_paper_count_var = tk.StringVar(value="논문 수: 0건")
 
         self.recursive_var = tk.BooleanVar(value=self.app_config.recursive)
         self.watch_mode_var = tk.StringVar(
@@ -690,9 +701,11 @@ class OrganizerGUI:
 
         settings_tab = ttk.Frame(notebook, padding=10)
         search_tab = ttk.Frame(notebook, padding=10)
+        professor_tab = ttk.Frame(notebook, padding=10)
         log_tab = ttk.Frame(notebook, padding=10)
         notebook.add(settings_tab, text="기본 설정")
         notebook.add(search_tab, text="검색")
+        notebook.add(professor_tab, text="교수성과")
         notebook.add(log_tab, text="로그")
 
         top = ttk.LabelFrame(settings_tab, text="기본 설정", padding=10)
@@ -971,6 +984,7 @@ class OrganizerGUI:
         )
 
         self._build_search_tab(search_tab)
+        self._build_professor_tab(professor_tab)
         self._build_log_tab(log_tab)
 
     def _build_search_tab(self, parent: ttk.Frame) -> None:
@@ -1056,14 +1070,55 @@ class OrganizerGUI:
             pady=4,
         )
 
-        ttk.Label(filters, text="최대 건수").grid(
+        ttk.Label(filters, text="SCIE").grid(
+            row=2, column=0, sticky="w", padx=(0, 6), pady=4
+        )
+        scie_combo = self._grid_combobox(
+            filters,
+            textvariable=self.scie_var,
+            values=["", "SCIE", "Yes", "No", "Unknown"],
+            state="readonly",
+            row=2,
+            column=1,
+            sticky="ew",
+            pady=4,
+        )
+
+        ttk.Label(filters, text="Q등급").grid(
+            row=2, column=2, sticky="w", padx=(16, 6), pady=4
+        )
+        quartile_combo = self._grid_combobox(
+            filters,
+            textvariable=self.quartile_var,
+            values=["", "Q1", "Q2", "Q3", "Q4"],
+            state="readonly",
+            row=2,
+            column=3,
+            sticky="ew",
+            pady=4,
+        )
+
+        ttk.Label(filters, text="최소 IF").grid(
             row=2, column=4, sticky="w", padx=(16, 6), pady=4
+        )
+        min_if_entry = self._grid_entry(
+            filters,
+            textvariable=self.min_if_var,
+            width=10,
+            row=2,
+            column=5,
+            sticky="ew",
+            pady=4,
+        )
+
+        ttk.Label(filters, text="최대 건수").grid(
+            row=3, column=4, sticky="w", padx=(16, 6), pady=4
         )
         limit_entry = self._grid_entry(
             filters,
             textvariable=self.limit_var,
             width=10,
-            row=2,
+            row=3,
             column=5,
             sticky="ew",
             pady=4,
@@ -1076,6 +1131,9 @@ class OrganizerGUI:
             field_combo,
             venue_entry,
             doc_type_combo,
+            scie_combo,
+            quartile_combo,
+            min_if_entry,
             limit_entry,
         ]:
             entry.bind("<Return>", lambda event: self.search())
@@ -1120,6 +1178,15 @@ class OrganizerGUI:
             command=self.clear_filters,
             style_name="Soft.TButton",
             width=12,
+            side="left",
+            padx=6,
+        )
+        self._pack_button(
+            action_row_top,
+            text="IF 정렬",
+            command=lambda: self.sort_tree_by("impact_factor"),
+            style_name="Soft.TButton",
+            width=10,
             side="left",
             padx=6,
         )
@@ -1240,6 +1307,8 @@ class OrganizerGUI:
             "doc_type": "문서유형",
             "scie": "SCIE",
             "impact_factor": "Impact Factor",
+            "quartile": "Q",
+            "openalex_score": "OpenAlex Score",
             "field": "분야",
             "year": "연도",
             "author": "저자",
@@ -1253,6 +1322,8 @@ class OrganizerGUI:
             "doc_type": 90,
             "scie": 90,
             "impact_factor": 110,
+            "quartile": 60,
+            "openalex_score": 110,
             "field": 70,
             "year": 70,
             "author": 110,
@@ -1365,6 +1436,216 @@ class OrganizerGUI:
         self.academic_count_var.set(f"학술 논문: {academic}건")
         self.non_academic_count_var.set(f"비학술 문서: {non_academic}건")
         self.unknown_count_var.set(f"미분류: {unknown}건")
+
+    def _build_professor_tab(self, parent: ttk.Frame) -> None:
+        top_row = ttk.Frame(parent)
+        top_row.pack(fill="x", pady=(0, 8))
+
+        self._pack_button(
+            top_row,
+            text="최신 교수명단 가져오기",
+            command=self.export_latest_professors_list,
+            style_name="Orange.TButton",
+            width=18,
+            side="left",
+        )
+        self._pack_button(
+            top_row,
+            text="교수성과 CSV 생성",
+            command=self.export_professor_achievements,
+            style_name="Green.TButton",
+            width=18,
+            side="left",
+            padx=6,
+        )
+        self._pack_button(
+            top_row,
+            text="교수성과 CSV 불러오기",
+            command=self.load_professor_achievements_csv,
+            style_name="Blue.TButton",
+            width=18,
+            side="left",
+            padx=6,
+        )
+        self._pack_button(
+            top_row,
+            text="표 비우기",
+            command=self._clear_professor_table,
+            style_name="Soft.TButton",
+            width=10,
+            side="left",
+            padx=6,
+        )
+
+        info_box = ttk.LabelFrame(parent, text="불러온 파일", padding=10)
+        info_box.pack(fill="x", pady=(0, 8))
+        ttk.Label(info_box, textvariable=self.prof_csv_path_var, anchor="w").pack(fill="x")
+
+        dashboard = ttk.LabelFrame(parent, text="교수성과 요약", padding=10)
+        dashboard.pack(fill="x", pady=(0, 8))
+        ttk.Label(dashboard, textvariable=self.prof_count_var).grid(row=0, column=0, sticky="w", padx=(0, 20))
+        ttk.Label(dashboard, textvariable=self.prof_paper_count_var).grid(row=0, column=1, sticky="w")
+
+        tree_frame = ttk.Frame(parent)
+        tree_frame.pack(fill="both", expand=True)
+
+        self.prof_columns = (
+            "professor",
+            "department",
+            "journal",
+            "pubdate",
+            "scie",
+            "impact_factor",
+            "quartile",
+            "openalex_score",
+            "title",
+            "pmid",
+            "doi",
+        )
+
+        self.prof_tree = ttk.Treeview(
+            tree_frame,
+            columns=self.prof_columns,
+            show="headings",
+            selectmode="browse",
+        )
+
+        headings = {
+            "professor": "교수명",
+            "department": "교실",
+            "journal": "저널",
+            "pubdate": "발행일",
+            "scie": "SCIE",
+            "impact_factor": "Impact Factor",
+            "quartile": "Q",
+            "openalex_score": "OpenAlex Score",
+            "title": "논문 제목",
+            "pmid": "PMID",
+            "doi": "DOI",
+        }
+        widths = {
+            "professor": 120,
+            "department": 120,
+            "journal": 180,
+            "pubdate": 110,
+            "scie": 80,
+            "impact_factor": 100,
+            "quartile": 60,
+            "openalex_score": 110,
+            "title": 420,
+            "pmid": 100,
+            "doi": 180,
+        }
+
+        for col in self.prof_columns:
+            self.prof_tree.heading(col, text=headings[col])
+            self.prof_tree.column(col, width=widths[col], anchor="w")
+
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.prof_tree.yview)
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.prof_tree.xview)
+        self.prof_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
+        vsb.pack(side="right", fill="y")
+        hsb.pack(side="bottom", fill="x")
+        self.prof_tree.pack(side="left", fill="both", expand=True)
+
+        self.prof_tree.bind("<Double-1>", self._open_selected_professor_achievement)
+
+    def _clear_professor_table(self) -> None:
+        if hasattr(self, "prof_tree"):
+            for item in self.prof_tree.get_children():
+                self.prof_tree.delete(item)
+        self.prof_csv_path_var.set("불러온 교수성과 CSV 없음")
+        self.prof_count_var.set("교수 수: 0명")
+        self.prof_paper_count_var.set("논문 수: 0건")
+
+    def _update_professor_dashboard(self) -> None:
+        if not hasattr(self, "prof_tree"):
+            return
+        rows = []
+        for item in self.prof_tree.get_children():
+            rows.append(self.prof_tree.item(item, "values"))
+        professors = {row[0] for row in rows if row and row[0]}
+        self.prof_count_var.set(f"교수 수: {len(professors)}명")
+        self.prof_paper_count_var.set(f"논문 수: {len(rows)}건")
+
+    def load_professor_achievements_csv(self) -> None:
+        file_path = filedialog.askopenfilename(
+            title="교수 연구성과 CSV 선택",
+            filetypes=[("CSV 파일", "*.csv"), ("모든 파일", "*.*")],
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, newline="", encoding="utf-8-sig") as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
+
+            self._clear_professor_table()
+            self.prof_csv_path_var.set(file_path)
+
+            for row in rows:
+                professor = row.get("professor") or row.get("교수명") or row.get("name") or ""
+                department = row.get("department") or row.get("교실") or ""
+                journal = row.get("journal") or row.get("저널명") or row.get("fulljournalname") or ""
+                pubdate = row.get("pubdate") or row.get("발행일") or row.get("year") or ""
+                scie = row.get("scie") or row.get("SCIE") or ""
+                impact_factor = row.get("impact_factor") or row.get("Impact Factor") or row.get("impact") or ""
+                quartile = row.get("quartile") or row.get("Q") or row.get("q") or ""
+                openalex_score = row.get("openalex_score") or row.get("OpenAlex Score") or row.get("score") or ""
+                title = row.get("title") or row.get("논문 제목") or ""
+                pmid = row.get("pmid") or row.get("PMID") or ""
+                doi = row.get("doi") or row.get("DOI") or ""
+
+                self.prof_tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        professor,
+                        department,
+                        journal,
+                        pubdate,
+                        scie,
+                        impact_factor,
+                        quartile,
+                        openalex_score,
+                        title,
+                        pmid,
+                        doi,
+                    ),
+                    tags=(row.get("pubmed_url", ""), row.get("doi_url", "")),
+                )
+
+            self._update_professor_dashboard()
+            self.append_log(f"[PROF-CSV] 교수성과 CSV 불러오기 완료: {file_path} | {len(rows)}건")
+            self.set_status(f"교수성과 CSV 불러오기 완료: {len(rows)}건")
+        except Exception as exc:
+            messagebox.showerror("오류", f"교수성과 CSV를 불러오는 중 오류가 발생했습니다:\n{exc}")
+
+    def _open_selected_professor_achievement(self, event=None) -> None:
+        if not hasattr(self, "prof_tree"):
+            return
+        selection = self.prof_tree.selection()
+        if not selection:
+            return
+        item_id = selection[0]
+        values = self.prof_tree.item(item_id, "values")
+        tags = self.prof_tree.item(item_id, "tags")
+        pubmed_url = tags[0] if len(tags) > 0 else ""
+        doi_url = tags[1] if len(tags) > 1 else ""
+
+        target = pubmed_url or doi_url
+        if target:
+            webbrowser.open(target)
+            return
+
+        pmid = values[9] if len(values) > 9 else ""
+        doi = values[10] if len(values) > 10 else ""
+        if pmid:
+            webbrowser.open(f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/")
+        elif doi:
+            webbrowser.open(f"https://doi.org/{doi}")
 
     def _build_log_tab(self, parent: ttk.Frame) -> None:
         frame = ttk.Frame(parent)
@@ -2042,6 +2323,9 @@ class OrganizerGUI:
         self.field_var.set("")
         self.venue_var.set("")
         self.doc_type_var.set("")
+        self.scie_var.set("")
+        self.quartile_var.set("")
+        self.min_if_var.set("")
         self.limit_var.set("50")
         self._clear_results()
         self._set_text_widget(self.snippet_text, "")
@@ -2075,6 +2359,9 @@ class OrganizerGUI:
                 field_code=self.field_var.get().strip() or None,
                 venue=self.venue_var.get().strip() or None,
                 doc_type=self.doc_type_var.get().strip() or None,
+                scie=self.scie_var.get().strip() or None,
+                min_impact_factor=self.min_if_var.get().strip() or None,
+                quartile=self.quartile_var.get().strip() or None,
                 limit=limit,
             )
         except Exception as exc:
@@ -2095,6 +2382,8 @@ class OrganizerGUI:
                     getattr(row, "doc_type", "unknown"),
                     getattr(row, "scie", ""),
                     getattr(row, "impact_factor", ""),
+                    getattr(row, "quartile", ""),
+                    getattr(row, "openalex_score", ""),
                     row.field_code,
                     row.year,
                     row.first_author,
@@ -2620,6 +2909,134 @@ class OrganizerGUI:
         self.set_status(
             f"PubMed 열기 완료: {opened}건 열기, 직접 매칭 {matched}건"
         )
+
+    def export_latest_professors_list(self) -> None:
+        default_dir = Path(self.output_var.get().strip() or str(Path.home()))
+        default_name = f"yonsei_professors_latest_{time.strftime('%Y%m%d_%H%M%S')}"
+        output_csv = filedialog.asksaveasfilename(
+            title="최신 연세의대 교수명단 CSV 저장",
+            defaultextension=".csv",
+            initialdir=str(default_dir),
+            initialfile=default_name + ".csv",
+            filetypes=[("CSV", "*.csv")],
+        )
+        if not output_csv:
+            return
+
+        self.set_status("연세의대 최신 교수명단 수집 중...")
+        self.append_log("[YONSEI] 최신 교수명단 자동 수집 시작")
+
+        def worker() -> None:
+            try:
+                result = export_latest_yonsei_professors_csv(
+                    output_csv,
+                    logger=self.append_log,
+                )
+                self.root.after(
+                    0,
+                    lambda: self.set_status(
+                        f"최신 교수명단 저장 완료: {result.get('professors', 0)}명"
+                    ),
+                )
+                self.root.after(
+                    0,
+                    lambda: messagebox.showinfo(
+                        "완료",
+                        "최신 연세의대 교수명단 CSV 생성이 완료되었습니다.\n\n"
+                        f"저장 파일: {output_csv}",
+                    ),
+                )
+            except Exception as exc:
+                self.append_log(f"[YONSEI-ERROR] {exc}")
+                self.root.after(
+                    0,
+                    lambda: messagebox.showerror(
+                        "오류", f"최신 교수명단 수집 중 오류가 발생했습니다:\n{exc}"
+                    ),
+                )
+                self.root.after(0, lambda: self.set_status("최신 교수명단 수집 실패"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+
+    def export_professor_achievements(self) -> None:
+        professors_file = filedialog.askopenfilename(
+            title="교수 목록 파일 선택 (최신 명단은 '최신 교수명단 가져오기'로 먼저 생성)",
+            filetypes=[
+                ("CSV or TXT", "*.csv *.txt"),
+                ("CSV", "*.csv"),
+                ("Text", "*.txt"),
+                ("All Files", "*.*"),
+            ],
+        )
+        if not professors_file:
+            return
+
+        try:
+            per_professor_limit = int(
+                simpledialog.askstring(
+                    "교수성과 CSV 생성",
+                    "교수 1인당 최대 논문 수를 입력하세요.",
+                    initialvalue="20",
+                    parent=self.root,
+                )
+                or "20"
+            )
+        except Exception:
+            per_professor_limit = 20
+
+        per_professor_limit = max(1, min(per_professor_limit, 200))
+
+        default_dir = Path(self.output_var.get().strip() or str(Path(professors_file).parent))
+        default_name = f"yonsei_professor_achievements_{time.strftime('%Y%m%d_%H%M%S')}"
+        output_csv = filedialog.asksaveasfilename(
+            title="교수 연구성과 CSV 저장",
+            defaultextension=".csv",
+            initialdir=str(default_dir),
+            initialfile=default_name + ".csv",
+            filetypes=[("CSV", "*.csv")],
+        )
+        if not output_csv:
+            return
+
+        email = self.crossref_email_var.get().strip()
+        self.set_status("연세의대 교수 연구성과 CSV 생성 중...")
+        self.append_log(f"[PROF] 교수 목록 파일: {professors_file}")
+
+        def worker() -> None:
+            try:
+                result = export_professor_achievements_csv(
+                    professors_file,
+                    output_csv,
+                    email=email,
+                    per_professor_limit=per_professor_limit,
+                    logger=self.append_log,
+                )
+                self.root.after(
+                    0,
+                    lambda: self.set_status(
+                        f"교수성과 CSV 완료: 교수 {result.get('professors', 0)}명 | 논문 {result.get('papers', 0)}건 | 오류 {result.get('errors', 0)}건"
+                    ),
+                )
+                self.root.after(
+                    0,
+                    lambda: messagebox.showinfo(
+                        "완료",
+                        "교수 연구성과 CSV 생성이 완료되었습니다.\n\n"
+                        f"저장 파일: {output_csv}",
+                    ),
+                )
+            except Exception as exc:
+                self.append_log(f"[PROF-ERROR] {exc}")
+                self.root.after(
+                    0,
+                    lambda: messagebox.showerror(
+                        "오류", f"교수 연구성과 CSV 생성 중 오류가 발생했습니다:\n{exc}"
+                    ),
+                )
+                self.root.after(0, lambda: self.set_status("교수성과 CSV 생성 실패"))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def get_db_path(self) -> Path | None:
         output_dir = self.output_var.get().strip()

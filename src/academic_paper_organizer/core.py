@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, quote
 
 from pypdf import PdfReader
 from watchdog.events import FileSystemEventHandler
@@ -64,6 +64,8 @@ class PaperRow:
     doc_reasons_json: str
     scie: str = ""
     impact_factor: str = ""
+    quartile: str = ""
+    openalex_score: str = ""
 
 
 def load_journal_metrics(csv_path: str | Path = "journal_metrics.csv") -> dict[str, tuple[str, str]]:
@@ -90,10 +92,10 @@ def load_journal_metrics(csv_path: str | Path = "journal_metrics.csv") -> dict[s
 JOURNAL_DB = load_journal_metrics()
 
 
-def fetch_openalex_journal_metrics(venue: str) -> tuple[str, str]:
+def fetch_openalex_journal_metrics(venue: str) -> tuple[str, str, str]:
     venue = str(venue or "").strip()
     if not venue:
-        return "", ""
+        return "", "", ""
 
     try:
         res = requests.get(
@@ -105,7 +107,7 @@ def fetch_openalex_journal_metrics(venue: str) -> tuple[str, str]:
         payload = res.json() or {}
         results = payload.get("results") or []
         if not results:
-            return "", ""
+            return "", "", ""
 
         item = results[0] or {}
         is_in_doaj = bool(item.get("is_in_doaj"))
@@ -116,28 +118,49 @@ def fetch_openalex_journal_metrics(venue: str) -> tuple[str, str]:
         cited_by_count = item.get("cited_by_count") or 0
 
         scie = "SCIE" if (works_count or cited_by_count or is_in_doaj or is_oa) else "Unknown"
+        impact_factor = ""
         if cited_half_life not in (None, ""):
-            impact = f"OA:{float(cited_half_life):.2f}"
+            openalex_score = f"{float(cited_half_life):.2f}"
         elif cited_by_count:
-            impact = f"OA-CITES:{round(float(cited_by_count) / 1000.0, 2):.2f}"
+            openalex_score = f"{round(float(cited_by_count) / 1000.0, 2):.2f}"
         else:
-            impact = ""
+            openalex_score = ""
 
-        return scie, impact
+        return scie, impact_factor, openalex_score
     except Exception:
-        return "", ""
+        return "", "", ""
 
-
-def fetch_journal_metrics(venue: str) -> tuple[str, str]:
+def fetch_journal_metrics(venue: str) -> tuple[str, str, str]:
     venue = str(venue or "").strip()
     if not venue:
-        return "", ""
+        return "", "", ""
 
     key = venue.casefold()
     if key in JOURNAL_DB:
-        return JOURNAL_DB[key]
+        scie, impact_factor = JOURNAL_DB[key]
+        return scie, impact_factor, ""
 
     return fetch_openalex_journal_metrics(venue)
+
+
+def classify_quartile(impact_factor: str | int | float | None) -> str:
+    try:
+        if impact_factor is None:
+            return ""
+        text = str(impact_factor).strip()
+        if not text or text.lower() in {"unknown", "n/a", "na"}:
+            return ""
+        value = float(text)
+    except Exception:
+        return ""
+
+    if value >= 20:
+        return "Q1"
+    if value >= 10:
+        return "Q2"
+    if value >= 3:
+        return "Q3"
+    return "Q4"
 
 
 def _current_year() -> int:
@@ -347,6 +370,8 @@ class PaperIndex:
                 doc_reasons_json TEXT,
                 scie TEXT,
                 impact_factor TEXT,
+                quartile TEXT,
+                openalex_score TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
             """
@@ -397,6 +422,10 @@ class PaperIndex:
             cur.execute("ALTER TABLE papers ADD COLUMN scie TEXT")
         if "impact_factor" not in columns:
             cur.execute("ALTER TABLE papers ADD COLUMN impact_factor TEXT")
+        if "quartile" not in columns:
+            cur.execute("ALTER TABLE papers ADD COLUMN quartile TEXT")
+        if "openalex_score" not in columns:
+            cur.execute("ALTER TABLE papers ADD COLUMN openalex_score TEXT")
 
         self.conn.commit()
 
@@ -469,18 +498,22 @@ class PaperIndex:
         doc_reasons_json: str,
         scie: str = "",
         impact_factor: str = "",
+        quartile: str = "",
+        openalex_score: str = "",
     ) -> None:
         safe_year = normalize_year(year)
-        if not scie and not impact_factor:
-            scie, impact_factor = fetch_journal_metrics(venue)
+        if not scie and not impact_factor and not openalex_score:
+            scie, impact_factor, openalex_score = fetch_journal_metrics(venue)
+        if not quartile:
+            quartile = classify_quartile(impact_factor)
         cur = self.conn.cursor()
         cur.execute(
             """
             INSERT INTO papers (
                 field_code, year, first_author, authors_json, venue, title, doi,
                 path, original_path, snippet, doc_type, doc_score, doc_reasons_json,
-                scie, impact_factor
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                scie, impact_factor, quartile, openalex_score
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 field_code,
@@ -498,6 +531,7 @@ class PaperIndex:
                 doc_reasons_json,
                 scie,
                 impact_factor,
+                openalex_score,
             ),
         )
         self.conn.commit()
@@ -517,6 +551,9 @@ class PaperIndex:
         venue: str | None = None,
         doc_type: str | None = None,
         file_path: str | None = None,
+        scie: str | None = None,
+        min_impact_factor: str | None = None,
+        quartile: str | None = None,
         limit: int = 50,
     ) -> list[PaperRow]:
         sql = """
@@ -535,7 +572,9 @@ class PaperIndex:
                 COALESCE(doc_score, '') AS doc_score,
                 COALESCE(doc_reasons_json, '[]') AS doc_reasons_json,
                 COALESCE(scie, '') AS scie,
-                COALESCE(impact_factor, '') AS impact_factor
+                COALESCE(impact_factor, '') AS impact_factor,
+                COALESCE(quartile, '') AS quartile,
+                COALESCE(openalex_score, '') AS openalex_score
             FROM papers
             WHERE 1=1
         """
@@ -566,6 +605,22 @@ class PaperIndex:
         if doc_type:
             sql += " AND COALESCE(doc_type, 'unknown') = ?"
             params.append(doc_type)
+
+        if scie:
+            sql += " AND COALESCE(scie, '') = ?"
+            params.append(scie)
+
+        if quartile:
+            sql += " AND COALESCE(quartile, '') = ?"
+            params.append(quartile)
+
+        if min_impact_factor:
+            try:
+                min_if_value = float(str(min_impact_factor).strip())
+                sql += " AND CAST(COALESCE(NULLIF(impact_factor, ''), '0') AS REAL) >= ?"
+                params.append(min_if_value)
+            except Exception:
+                pass
 
         if file_path:
             normalized_path = str(Path(file_path))
@@ -604,6 +659,8 @@ class PaperIndex:
                 doc_reasons_json=row["doc_reasons_json"] or "[]",
                 scie=row["scie"] or "",
                 impact_factor=row["impact_factor"] or "",
+                quartile=row["quartile"] or "",
+                openalex_score=row["openalex_score"] or "",
             )
             for row in rows
         ]
@@ -2171,3 +2228,415 @@ def scan_existing_pdfs(
     logger(
         f"[SCAN] 기존 PDF 처리 완료: 총 {total}건 | 처리={ok_count} | 건너뜀={skip_count} | 오류={err_count}"
     )
+
+
+
+def _safe_filename(text: str) -> str:
+    text = re.sub(r'[\/:*?"<>|]+', '_', str(text or '').strip())
+    text = re.sub(r'\s+', '_', text)
+    return text[:120] or 'professors'
+
+
+def load_professors_file(file_path: str | Path) -> list[dict[str, str]]:
+    path = Path(file_path)
+    entries: list[dict[str, str]] = []
+
+    if path.suffix.lower() == '.txt':
+        for line in path.read_text(encoding='utf-8').splitlines():
+            name = line.strip()
+            if not name or name.startswith('#'):
+                continue
+            entries.append({
+                'name': name,
+                'query': name,
+                'department': '',
+                'affiliation': 'Yonsei OR Severance',
+            })
+        return entries
+
+    with path.open('r', encoding='utf-8-sig', newline='') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            name = str(
+                row.get('name')
+                or row.get('Name')
+                or row.get('professor')
+                or row.get('Professor')
+                or row.get('교수명')
+                or ''
+            ).strip()
+            query = str(
+                row.get('query')
+                or row.get('Query')
+                or row.get('pubmed_query')
+                or row.get('PubMed Query')
+                or row.get('검색명')
+                or name
+            ).strip()
+            department = str(
+                row.get('department')
+                or row.get('Department')
+                or row.get('소속')
+                or ''
+            ).strip()
+            affiliation = str(
+                row.get('affiliation')
+                or row.get('Affiliation')
+                or row.get('기관필터')
+                or 'Yonsei OR Severance'
+            ).strip()
+
+            if not name and not query:
+                continue
+
+            entries.append({
+                'name': name or query,
+                'query': query or name,
+                'department': department,
+                'affiliation': affiliation or 'Yonsei OR Severance',
+            })
+
+    return entries
+
+
+def _build_pubmed_author_term(author_query: str, affiliation: str = 'Yonsei OR Severance') -> str:
+    author_query = str(author_query or '').strip()
+    affiliation = str(affiliation or '').strip()
+
+    if not author_query:
+        return ''
+
+    author_term = f'"{author_query}"[Author]'
+    if not affiliation:
+        return author_term
+
+    tokens = [token.strip() for token in re.split(r'\s+OR\s+|,', affiliation, flags=re.IGNORECASE) if token.strip()]
+    aff_term = ' OR '.join(f'"{token}"[Affiliation]' for token in tokens)
+    return f'({author_term}) AND ({aff_term})' if aff_term else author_term
+
+
+def search_pubmed_by_author(
+    author_query: str,
+    *,
+    affiliation: str = 'Yonsei OR Severance',
+    email: str = '',
+    retmax: int = 20,
+) -> list[str]:
+    term = _build_pubmed_author_term(author_query, affiliation=affiliation)
+    if not term:
+        return []
+
+    params = {
+        'db': 'pubmed',
+        'term': term,
+        'retmode': 'json',
+        'retmax': max(1, min(int(retmax or 20), 200)),
+        'sort': 'pub date',
+        'tool': 'academic-paper-organizer',
+    }
+    if email:
+        params['email'] = email
+
+    response = requests.get(
+        'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi',
+        params=params,
+        timeout=15,
+    )
+    response.raise_for_status()
+    payload = response.json() or {}
+    return list((payload.get('esearchresult') or {}).get('idlist') or [])
+
+
+def fetch_pubmed_summaries(pmids: list[str], *, email: str = '') -> list[dict]:
+    ids = [str(p).strip() for p in pmids if str(p).strip()]
+    if not ids:
+        return []
+
+    params = {
+        'db': 'pubmed',
+        'id': ','.join(ids),
+        'retmode': 'json',
+        'version': '2.0',
+        'tool': 'academic-paper-organizer',
+    }
+    if email:
+        params['email'] = email
+
+    response = requests.get(
+        'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi',
+        params=params,
+        timeout=20,
+    )
+    response.raise_for_status()
+    payload = response.json() or {}
+    result = payload.get('result') or {}
+
+    rows: list[dict] = []
+    for pmid in ids:
+        item = result.get(pmid) or {}
+        if item:
+            rows.append(item)
+    return rows
+
+
+def _extract_pubmed_doi(item: dict) -> str:
+    articleids = item.get('articleids') or []
+    for article_id in articleids:
+        if str(article_id.get('idtype', '')).lower() == 'doi':
+            return normalize_doi(str(article_id.get('value', '')).strip())
+    elocation = str(item.get('elocationid') or '').strip()
+    if '10.' in elocation.lower():
+        return normalize_doi(elocation)
+    return ''
+
+
+def _format_pubmed_authors(item: dict, max_authors: int = 8) -> str:
+    authors = item.get('authors') or []
+    names = []
+    for author in authors[:max_authors]:
+        name = str(author.get('name') or '').strip()
+        if name:
+            names.append(name)
+    if len(authors) > max_authors:
+        names.append('et al.')
+    return '; '.join(names)
+
+
+def export_professor_achievements_csv(
+    professors_file: str | Path,
+    output_csv: str | Path,
+    *,
+    email: str = '',
+    per_professor_limit: int = 20,
+    logger: Callable[[str], None] | None = None,
+) -> dict[str, int]:
+    def _log(msg: str) -> None:
+        if logger:
+            logger(msg)
+
+    professors = load_professors_file(professors_file)
+    output_csv = Path(output_csv)
+    output_csv.parent.mkdir(parents=True, exist_ok=True)
+
+    rows_to_write: list[dict[str, str]] = []
+    professor_count = 0
+    paper_count = 0
+    error_count = 0
+
+    for professor in professors:
+        professor_count += 1
+        name = professor.get('name', '').strip()
+        query = professor.get('query', '').strip() or name
+        department = professor.get('department', '').strip()
+        affiliation = professor.get('affiliation', '').strip() or 'Yonsei OR Severance'
+
+        _log(f'[PROF] 조회 시작: {name} | query={query} | affiliation={affiliation}')
+
+        try:
+            pmids = search_pubmed_by_author(
+                query,
+                affiliation=affiliation,
+                email=email,
+                retmax=per_professor_limit,
+            )
+            if not pmids:
+                _log(f'[PROF] 결과 없음: {name}')
+                continue
+
+            summaries = fetch_pubmed_summaries(pmids, email=email)
+            _log(f'[PROF] {name}: PMID {len(pmids)}건, 요약 {len(summaries)}건')
+
+            for item in summaries:
+                title = str(item.get('title') or '').strip()
+                journal = str(item.get('fulljournalname') or item.get('source') or '').strip()
+                pubdate = str(item.get('pubdate') or '').strip()
+                doi = _extract_pubmed_doi(item)
+                pmid = str(item.get('uid') or '').strip()
+                authors = _format_pubmed_authors(item)
+                scie, impact_factor, openalex_score = fetch_journal_metrics(journal)
+                quartile = classify_quartile(impact_factor)
+
+                rows_to_write.append({
+                    'professor_name': name,
+                    'professor_query': query,
+                    'department': department,
+                    'affiliation_filter': affiliation,
+                    'pmid': pmid,
+                    'title': title,
+                    'journal': journal,
+                    'year': normalize_year(pubdate, allow_historic=True) if pubdate else '',
+                    'pubdate': pubdate,
+                    'doi': doi,
+                    'authors': authors,
+                    'scie': scie,
+                    'impact_factor': impact_factor,
+                    'quartile': quartile,
+                    'openalex_score': openalex_score,
+                    'pubmed_url': f'https://pubmed.ncbi.nlm.nih.gov/{pmid}/' if pmid else '',
+                    'doi_url': f'https://doi.org/{doi}' if doi else '',
+                })
+                paper_count += 1
+        except Exception as exc:
+            error_count += 1
+            _log(f'[PROF-ERROR] {name}: {exc}')
+
+    rows_to_write.sort(key=lambda row: (row.get('professor_name', ''), row.get('pubdate', '')), reverse=False)
+
+    fieldnames = [
+        'professor_name',
+        'professor_query',
+        'department',
+        'affiliation_filter',
+        'pmid',
+        'title',
+        'journal',
+        'year',
+        'pubdate',
+        'doi',
+        'authors',
+        'scie',
+        'impact_factor',
+        'quartile',
+        'openalex_score',
+        'pubmed_url',
+        'doi_url',
+    ]
+
+    with output_csv.open('w', encoding='utf-8-sig', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows_to_write)
+
+    _log(f'[PROF] CSV 저장 완료: {output_csv}')
+    return {
+        'professors': professor_count,
+        'papers': paper_count,
+        'errors': error_count,
+        'output_csv': str(output_csv),
+    }
+
+
+from html import unescape
+
+def _normalize_professor_name_text(text: str) -> str:
+    text = unescape(text or '')
+    text = re.sub(r'<[^>]+>', ' ', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    text = text.replace('교수', '').strip()
+    return text
+
+
+def _looks_like_korean_person_name(text: str) -> bool:
+    t = (text or '').strip()
+    return bool(re.fullmatch(r'[가-힣]{2,5}', t))
+
+
+def _extract_professors_from_html(html: str, source_url: str = '') -> list[dict[str, str]]:
+    results: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    if not html:
+        return results
+
+    patterns = [
+        r'<a[^>]*href=["'](?P<href>[^"']+)["'][^>]*>(?P<text>.*?)</a>',
+        r'<li[^>]*>(?P<text>.*?)</li>',
+        r'<td[^>]*>(?P<text>.*?)</td>',
+        r'<div[^>]*class=["'][^"']*(?:name|prof|teacher)[^"']*["'][^>]*>(?P<text>.*?)</div>',
+        r'<span[^>]*class=["'][^"']*(?:name|prof|teacher)[^"']*["'][^>]*>(?P<text>.*?)</span>',
+    ]
+
+    for pattern in patterns:
+        for m in re.finditer(pattern, html, flags=re.IGNORECASE | re.DOTALL):
+            text = _normalize_professor_name_text(m.groupdict().get('text', ''))
+            if not _looks_like_korean_person_name(text):
+                continue
+            href = m.groupdict().get('href', '') or ''
+            department = ''
+            key = (text, href)
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append({
+                'name': text,
+                'query': text,
+                'department': department,
+                'affiliation': 'Yonsei University College of Medicine',
+                'source_url': source_url,
+                'profile_url': href,
+            })
+
+    # fallback plain text scan for Korean names near 교수 word
+    if not results:
+        for m in re.finditer(r'([가-힣]{2,5})\s*(?:교수|Prof\.?|Professor)', html):
+            text = m.group(1)
+            key = (text, '')
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append({
+                'name': text,
+                'query': text,
+                'department': '',
+                'affiliation': 'Yonsei University College of Medicine',
+                'source_url': source_url,
+                'profile_url': '',
+            })
+
+    return results
+
+
+def export_latest_yonsei_professors_csv(output_csv_path: str | Path, logger: Callable[[str], None] | None = None) -> dict[str, int | str]:
+    """
+    bs4 없이 requests + regex 기반으로 연세의대 공개 교수소개 페이지를 순회해
+    최신 교수명단 후보 CSV를 생성한다.
+    """
+    if logger is None:
+        logger = lambda msg: None
+
+    output_csv_path = Path(output_csv_path)
+    output_csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+    seed_urls = [
+        'https://medicine.yonsei.ac.kr/medicine/about/professor/basic.do',
+        'https://medicine.yonsei.ac.kr/medicine/about/professor/basic.do?mode=list',
+    ]
+
+    pages_checked = 0
+    professors: list[dict[str, str]] = []
+    seen_names: set[str] = set()
+    headers = {'User-Agent': 'Mozilla/5.0'}
+
+    for url in seed_urls:
+        try:
+            logger(f'[YONSEI] 수집 시도: {url}')
+            resp = requests.get(url, headers=headers, timeout=15)
+            resp.raise_for_status()
+            resp.encoding = resp.apparent_encoding or resp.encoding
+            pages_checked += 1
+            extracted = _extract_professors_from_html(resp.text, url)
+            for row in extracted:
+                name_key = row['name'].strip()
+                if not name_key or name_key in seen_names:
+                    continue
+                seen_names.add(name_key)
+                professors.append(row)
+        except Exception as exc:
+            logger(f'[YONSEI-WARN] 페이지 수집 실패: {url} | {exc}')
+
+    professors.sort(key=lambda r: (r.get('department', ''), r.get('name', '')))
+
+    with output_csv_path.open('w', encoding='utf-8-sig', newline='') as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=['name', 'query', 'department', 'affiliation', 'source_url', 'profile_url'],
+        )
+        writer.writeheader()
+        for row in professors:
+            writer.writerow(row)
+
+    logger(f'[YONSEI] 최신 교수명단 CSV 저장 완료: {output_csv_path} | {len(professors)}명')
+    return {
+        'path': str(output_csv_path),
+        'professors': len(professors),
+        'pages_checked': pages_checked,
+    }
