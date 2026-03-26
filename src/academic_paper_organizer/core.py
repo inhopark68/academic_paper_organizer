@@ -16,6 +16,8 @@ from urllib.parse import quote_plus, quote, urljoin
 
 from bs4 import BeautifulSoup
 
+from playwright.sync_api import sync_playwright
+
 from pypdf import PdfReader
 from watchdog.events import FileSystemEventHandler
 
@@ -2254,156 +2256,264 @@ def _safe_filename(text: str) -> str:
     return text[:120] or 'professors'
 
 YONSEI_MEDICINE_PROFESSOR_INDEX_URLS = [
-    "https://medicine.yonsei.ac.kr/medicine/about/professor/basic.do",
-    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic.do",
-    "https://medicine.yonsei.ac.kr/medicine/about/professor/humanities.do",
+    "https://medicine.yonsei.ac.kr/medicine/research/basic.do",          # 기초의학교실
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic.do",  # 임상의학교실
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/humanities.do",  # 인문의학교실
+]
+
+BAD_NAME_WORDS = {
+    "검색", "닫기", "뉴스", "채용", "입찰", "소개", "학장단", "역대학장", "동아리",
+    "대학", "대학생활", "의과대생활", "발달시험", "세미나", "강연", "공지", "공지사항",
+    "학교소개", "학교현황", "오시는 길", "연구", "연구기관", "부설연구소", "센터",
+    "클리닉", "교실", "교수소개", "전체교실", "입학", "입학전형", "입학공지",
+    "후원", "언론보도", "장례식장", "암병원", "안과병원", "재활병원", "척추병원",
+    "약학대학", "치과대학", "간호대학", "보건대학원", "주메뉴", "전체메뉴", "Home",
+    "TOP", "KO", "EN", "YONSEI", "Image", "이미지",
+}
+
+BAD_NAME_SUBSTRINGS = [
+    "yonsei", "severance", "medicine", "medical", "college", "school",
+    "department", "faculty", "clinic", "center", "research", "download",
+    "로그인", "회원가입", "교수의 책무", "학교안내", "학장소개",
+]
+
+TITLE_WORDS = [
+    "교수", "조교수", "부교수", "명예교수",
+    "Professor", "professor", "M.D.", "Ph.D.", "MD", "PhD",
 ]
 
 
-def _normalize_professor_name_for_query(name: str) -> str:
-    text = re.sub(r"\s+", " ", str(name or "")).strip()
+def _normalize_professor_name(name: str) -> str:
+    text = str(name or "")
+    text = re.sub(r"<[^>]+>", " ", text)
+
+    for token in TITLE_WORDS:
+        text = text.replace(token, " ")
+
+    text = re.sub(r"[|/·•,()\[\]<>]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
     return text
 
 
+def _normalize_professor_name_for_query(name: str) -> str:
+    name = _normalize_professor_name(name)
+    if not name:
+        return ""
+    return f'"{name}" 연세대학교 의과대학'
+
+
 def _looks_like_professor_name(text: str) -> bool:
-    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    value = _normalize_professor_name(text)
     if not value:
         return False
-    if len(value) > 40:
+
+    if len(value) < 2 or len(value) > 20:
         return False
+
+    if value in BAD_NAME_WORDS:
+        return False
+
     lowered = value.casefold()
-    banned_tokens = [
-        '교수소개', '전체교실', '이미지', 'yonsei', '로그인', '회원가입', '의과대학', '학교소개',
-        '학장소개', '연혁', '교육', '연구', '후원', '공지사항', '교수의 책무', '대학원', '학부',
-        '세브란스', '연세대학교', '교실', '센터', '클리닉', '연구소', '학과', 'school', 'department',
-        'medicine', 'medical', 'college', 'introduction', 'basic', 'clinic', 'humanities', 'download',
-    ]
-    if any(token in lowered for token in banned_tokens):
+    if any(token.casefold() in lowered for token in BAD_NAME_SUBSTRINGS):
         return False
+
+    if any(bad in value for bad in BAD_NAME_WORDS):
+        return False
+
+    if re.search(r"\d", value):
+        return False
+
     if re.fullmatch(r"[가-힣]{2,4}", value):
         return True
+    if re.fullmatch(r"[가-힣]{1,3}\s[가-힣]{1,3}", value):
+        return True
+
     if re.fullmatch(r"[A-Z][a-zA-Z'\-]+(?: [A-Z][a-zA-Z'\-]+){1,3}", value):
         return True
+    if re.fullmatch(r"[A-Z]\.\s?[A-Z][a-zA-Z'\-]+", value):
+        return True
+
     return False
 
 
-def _extract_professor_names_from_html(html: str) -> list[str]:
-    soup = BeautifulSoup(html, 'html.parser')
-    candidates: list[str] = []
-
-    selectors = [
-        '.professor', '.faculty', '.member', '.staff', '.teacher', '.name', '.tit', '.title',
-        '[class*=prof]', '[class*=faculty]', '[class*=member]', '[class*=staff]', '[class*=teacher]',
-        '[class*=name]', '[class*=tit]', '[class*=title]',
-        'li', 'dt', 'dd', 'strong', 'span', 'a', 'p', 'h1', 'h2', 'h3', 'h4', 'h5'
-    ]
-
-    for selector in selectors:
+def _remove_layout_noise(soup: BeautifulSoup) -> BeautifulSoup:
+    for selector in [
+        "header", "nav", "footer", "aside", "script", "style", "noscript",
+        ".gnb", ".lnb", ".breadcrumb", ".util", ".search", ".searchBox",
+        ".quick", ".quick-menu", ".site-map", ".sitemap", ".footer",
+        "#header", "#gnb", "#lnb", "#footer",
+    ]:
         for node in soup.select(selector):
-            text = node.get_text(' ', strip=True)
-            if not text:
-                continue
-            parts = [part.strip() for part in re.split(r"[|/,\n]|\s{2,}", text) if part.strip()]
-            for part in parts:
-                if _looks_like_professor_name(part):
-                    candidates.append(part)
+            node.decompose()
+    return soup
+
+
+def _extract_names_from_rendered_html(html: str) -> list[str]:
+    soup = BeautifulSoup(html, "html.parser")
+    soup = _remove_layout_noise(soup)
+
+    text_nodes = []
+    for node in soup.select("strong, b, dt, dd, li, td, p, h3, h4, h5, span, a"):
+        text = node.get_text(" ", strip=True)
+        if not text:
+            continue
+        if len(text) > 80:
+            continue
+        text_nodes.append(text)
+
+    candidates: list[str] = []
+    for text in text_nodes:
+        parts = [part.strip() for part in re.split(r"[|/,\n]|\s{2,}", text) if part.strip()]
+        for part in parts:
+            normalized = _normalize_professor_name(part)
+            if _looks_like_professor_name(normalized):
+                candidates.append(normalized)
 
     deduped: list[str] = []
     seen: set[str] = set()
     for name in candidates:
-        key = re.sub(r"\s+", " ", name).strip().casefold()
-        if key and key not in seen:
+        key = name.casefold()
+        if key not in seen:
             seen.add(key)
-            deduped.append(re.sub(r"\s+", " ", name).strip())
+            deduped.append(name)
+
     return deduped
 
 
-def fetch_latest_yonsei_professors(*, logger: Callable[[str], None] | None = None, timeout: int = 15) -> list[dict[str, str]]:
+def _collect_department_links(page, index_url: str) -> dict[str, str]:
+    links: dict[str, str] = {}
+
+    anchors = page.locator("a[href]")
+    count = anchors.count()
+
+    for i in range(count):
+        try:
+            a = anchors.nth(i)
+            href = a.get_attribute("href") or ""
+            text = re.sub(r"\s+", " ", a.inner_text() or "").strip()
+            full_url = urljoin(index_url, href)
+
+            if "medicine.yonsei.ac.kr" not in full_url:
+                continue
+
+            ok = (
+                "/medicine/about/professor/clinic/" in full_url
+                or "/medicine/about/professor/humanities/" in full_url
+                or "/medicine/research/basic/" in full_url
+            )
+            if not ok:
+                continue
+
+            if not text or len(text) > 40:
+                continue
+            if text in BAD_NAME_WORDS:
+                continue
+            if any(tok in text for tok in ["전체교실", "검색", "닫기", "TOP"]):
+                continue
+
+            links.setdefault(full_url, text)
+        except Exception:
+            continue
+
+    return links
+
+
+def fetch_latest_yonsei_professors(*, logger: Callable[[str], None] | None = None, timeout_ms: int = 20000) -> list[dict[str, str]]:
     def _log(msg: str) -> None:
         if logger:
             logger(msg)
 
-    session = requests.Session()
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (AcademicPaperOrganizer/1.0)',
-    })
-
-    department_pages: dict[str, str] = {}
-
-    for index_url in YONSEI_MEDICINE_PROFESSOR_INDEX_URLS:
-        try:
-            resp = session.get(index_url, timeout=timeout)
-            resp.raise_for_status()
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            _log(f'[YONSEI] 인덱스 페이지 조회: {index_url}')
-
-            for a in soup.find_all('a', href=True):
-                href = str(a.get('href') or '').strip()
-                text = a.get_text(' ', strip=True)
-                full_url = urljoin(index_url, href)
-                if 'medicine.yonsei.ac.kr' not in full_url:
-                    continue
-                if '/medicine/about/professor/' not in full_url and '/medicine/research/' not in full_url:
-                    continue
-                if any(skip in full_url for skip in ['/basic.do', '/clinic.do', '/humanities.do']):
-                    continue
-                if not text or len(text) > 60:
-                    continue
-                if '교수소개' in text or '전체교실' in text:
-                    continue
-                dept_name = re.sub(r'\s+', ' ', text).strip()
-                department_pages.setdefault(full_url, dept_name)
-        except Exception as exc:
-            _log(f'[YONSEI-WARN] 인덱스 조회 실패: {index_url} | {exc}')
-
     rows: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
+    department_pages: dict[str, str] = {}
 
-    for page_url, dept_name in department_pages.items():
-        try:
-            resp = session.get(page_url, timeout=timeout)
-            resp.raise_for_status()
-            names = _extract_professor_names_from_html(resp.text)
-            if not names:
-                _log(f'[YONSEI-WARN] 교수명 추출 실패: {dept_name} | {page_url}')
-                continue
-            for name in names:
-                key = (dept_name.casefold(), name.casefold())
-                if key in seen:
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context()
+        page = context.new_page()
+
+        for index_url in YONSEI_MEDICINE_PROFESSOR_INDEX_URLS:
+            try:
+                page.goto(index_url, wait_until="networkidle", timeout=timeout_ms)
+                page.wait_for_timeout(1500)
+                found = _collect_department_links(page, index_url)
+                department_pages.update(found)
+                _log(f"[YONSEI] 인덱스 수집: {index_url} -> {len(found)}개 교실")
+            except Exception as exc:
+                _log(f"[YONSEI-WARN] 인덱스 조회 실패: {index_url} | {exc}")
+
+        for page_url, dept_name in department_pages.items():
+            try:
+                page.goto(page_url, wait_until="networkidle", timeout=timeout_ms)
+                page.wait_for_timeout(2000)
+
+                html = page.content()
+                names = _extract_names_from_rendered_html(html)
+
+                if not names:
+                    _log(f"[YONSEI-WARN] 교수명 추출 실패: {dept_name} | {page_url}")
                     continue
-                seen.add(key)
-                rows.append({
-                    'name': name,
-                    'query': _normalize_professor_name_for_query(name),
-                    'department': dept_name,
-                    'affiliation': 'Yonsei OR Severance',
-                    'source_url': page_url,
-                    'orcid': '',
-                })
-            _log(f'[YONSEI] {dept_name}: 교수 후보 {len(names)}명')
-        except Exception as exc:
-            _log(f'[YONSEI-WARN] 교수 페이지 조회 실패: {dept_name} | {page_url} | {exc}')
 
-    rows.sort(key=lambda row: (row.get('department', ''), row.get('name', '')))
+                for name in names:
+                    query = _normalize_professor_name_for_query(name)
+                    if not query:
+                        continue
+
+                    key = (dept_name.casefold(), name.casefold())
+                    if key in seen:
+                        continue
+                    seen.add(key)
+
+                    rows.append({
+                        "name": name,
+                        "query": query,
+                        "department": dept_name,
+                        "affiliation": "Yonsei OR Severance",
+                        "source_url": page_url,
+                        "orcid": "",
+                    })
+
+                _log(f"[YONSEI] {dept_name}: 교수 후보 {len(names)}명")
+
+            except Exception as exc:
+                _log(f"[YONSEI-WARN] 교수 페이지 조회 실패: {dept_name} | {page_url} | {exc}")
+
+        browser.close()
+
+    if not rows:
+        raise RuntimeError(
+            "연세대 교수명단을 0건 가져왔습니다. "
+            "현재 사이트는 requests 기반 정적 파싱으로는 동작하지 않아 "
+            "브라우저 렌더링이 필요합니다."
+        )
+
+    rows.sort(key=lambda row: (row.get("department", ""), row.get("name", "")))
     return rows
+
+
+def validate_exported_rows(rows: list[dict[str, str]]) -> None:
+    sample_bad = {"검색", "닫기", "뉴스", "채용", "주메뉴", "전체메뉴", "동아리"}
+    polluted = [r for r in rows if r.get("name", "") in sample_bad]
+    if polluted:
+        raise ValueError(f"교수 명단 오염 감지: bad_rows={len(polluted)}")
 
 
 def export_latest_yonsei_professors_csv(output_csv: str | Path, *, logger: Callable[[str], None] | None = None) -> dict[str, int | str]:
     rows = fetch_latest_yonsei_professors(logger=logger)
+    validate_exported_rows(rows)
     output_csv = Path(output_csv)
     output_csv.parent.mkdir(parents=True, exist_ok=True)
 
-    fieldnames = ['name', 'query', 'department', 'affiliation', 'source_url', 'orcid']
-    with output_csv.open('w', encoding='utf-8-sig', newline='') as f:
+    fieldnames = ["name", "query", "department", "affiliation", "source_url", "orcid"]
+    with output_csv.open("w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
     return {
-        'professors': len(rows),
-        'output_csv': str(output_csv),
+        "professors": len(rows),
+        "output_csv": str(output_csv),
     }
-
 
 
 def load_professors_file(file_path: str | Path) -> list[dict[str, str]]:
