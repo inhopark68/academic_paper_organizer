@@ -32,6 +32,8 @@ from .core import (
     search_pubmed_by_title,
     export_professor_achievements_csv,
     export_latest_yonsei_professors_csv,
+    load_tagged_venue_display_names,
+    infer_venue_type,
 )
 try:
     from .core import scan_existing_pdfs_fast
@@ -188,6 +190,21 @@ class OrganizerGUI:
         self.min_if_var = tk.StringVar(value="")
         self.limit_var = tk.StringVar(value=self.app_config.limit)
         self.search_file_var = tk.StringVar(value="")
+        self.venue_type_var = tk.StringVar(value="unknown")
+
+        self.venue_display_list = load_tagged_venue_display_names()
+        self.filtered_venue_list = self.venue_display_list[:]
+        self.venue_display_map = {
+            item: item.split("] ", 1)[1] if "] " in item else item
+            for item in self.venue_display_list
+        }
+        self.journal_display_count = sum(1 for item in self.venue_display_list if item.startswith("[Journal] "))
+        self.conference_display_count = sum(1 for item in self.venue_display_list if item.startswith("[Conference] "))
+        self.venue_combo = None
+
+        self.scie_combo = None
+        self.quartile_combo = None
+        self.min_if_entry = None
 
         self.crossref_email_var = tk.StringVar(value=self.app_config.crossref_mailto)
         self.crossref_cache_days_var = tk.StringVar(
@@ -250,6 +267,7 @@ class OrganizerGUI:
         self.root.after(150, self._drain_log_queue)
 
         self.append_log("[GUI] 애플리케이션 시작")
+        self.append_log(f"[VENUE] 저널 {self.journal_display_count}개 | 학회 {self.conference_display_count}개 로드")
 
     def _configure_styles(self) -> None:
         style = ttk.Style()
@@ -679,6 +697,65 @@ class OrganizerGUI:
         return btn
 
 
+    def _normalize_selected_venue(self, value: str) -> str:
+        value = str(value or "").strip()
+        if not value:
+            return ""
+        return self.venue_display_map.get(value, value)
+
+    def _filter_venue_candidates(self, event=None) -> None:
+        if not self.venue_combo:
+            return
+
+        typed = self.venue_var.get().strip().lower()
+        if not typed:
+            values = self.venue_display_list
+        else:
+            values = []
+            for item in self.venue_display_list:
+                raw_name = self.venue_display_map.get(item, item)
+                if typed in item.lower() or typed in raw_name.lower():
+                    values.append(item)
+
+        self.filtered_venue_list = values[:200]
+        self.venue_combo["values"] = self.filtered_venue_list
+
+    def _reset_venue_candidates(self, event=None) -> None:
+        if not self.venue_combo:
+            return
+        self.venue_combo["values"] = self.venue_display_list
+
+    def _apply_venue_type_rules(self, venue_name: str) -> None:
+        venue_type = infer_venue_type(venue_name)
+        self.venue_type_var.set(venue_type)
+
+        if venue_type == "conference":
+            self.scie_var.set("")
+            self.quartile_var.set("")
+            self.min_if_var.set("")
+
+            if self.scie_combo:
+                self.scie_combo.configure(state="disabled")
+            if self.quartile_combo:
+                self.quartile_combo.configure(state="disabled")
+            if self.min_if_entry:
+                self.min_if_entry.configure(state="disabled")
+            return
+
+        if self.scie_combo:
+            self.scie_combo.configure(state="readonly")
+        if self.quartile_combo:
+            self.quartile_combo.configure(state="readonly")
+        if self.min_if_entry:
+            self.min_if_entry.configure(state="normal")
+
+    def _on_venue_selected(self, event=None) -> None:
+        selected = self.venue_var.get()
+        normalized = self._normalize_selected_venue(selected)
+        self.venue_var.set(normalized)
+        self._apply_venue_type_rules(normalized)
+        self._reset_venue_candidates()
+
     def _set_progress_text(self, text: str) -> None:
         self.root.after(0, lambda: self.progress_var.set(f"진행률: {text}"))
 
@@ -1049,14 +1126,19 @@ class OrganizerGUI:
         ttk.Label(filters, text="저널/학회").grid(
             row=1, column=2, sticky="w", padx=(16, 6), pady=4
         )
-        venue_entry = self._grid_entry(
+        self.venue_combo = self._grid_combobox(
             filters,
             textvariable=self.venue_var,
+            values=self.venue_display_list,
+            state="normal",
             row=1,
             column=3,
             sticky="ew",
             pady=4,
         )
+        self.venue_combo.bind("<KeyRelease>", self._filter_venue_candidates)
+        self.venue_combo.bind("<<ComboboxSelected>>", self._on_venue_selected)
+        self.venue_combo.bind("<Button-1>", self._reset_venue_candidates)
 
         ttk.Label(filters, text="문서유형").grid(
             row=1, column=4, sticky="w", padx=(16, 6), pady=4
@@ -1075,7 +1157,7 @@ class OrganizerGUI:
         ttk.Label(filters, text="SCIE").grid(
             row=2, column=0, sticky="w", padx=(0, 6), pady=4
         )
-        scie_combo = self._grid_combobox(
+        self.scie_combo = self._grid_combobox(
             filters,
             textvariable=self.scie_var,
             values=["", "SCIE", "Yes", "No", "Unknown"],
@@ -1089,7 +1171,7 @@ class OrganizerGUI:
         ttk.Label(filters, text="Q등급").grid(
             row=2, column=2, sticky="w", padx=(16, 6), pady=4
         )
-        quartile_combo = self._grid_combobox(
+        self.quartile_combo = self._grid_combobox(
             filters,
             textvariable=self.quartile_var,
             values=["", "Q1", "Q2", "Q3", "Q4"],
@@ -1103,7 +1185,7 @@ class OrganizerGUI:
         ttk.Label(filters, text="최소 IF").grid(
             row=2, column=4, sticky="w", padx=(16, 6), pady=4
         )
-        min_if_entry = self._grid_entry(
+        self.min_if_entry = self._grid_entry(
             filters,
             textvariable=self.min_if_var,
             width=10,
@@ -1131,11 +1213,11 @@ class OrganizerGUI:
             author_entry,
             year_entry,
             field_combo,
-            venue_entry,
+            self.venue_combo,
             doc_type_combo,
-            scie_combo,
-            quartile_combo,
-            min_if_entry,
+            self.scie_combo,
+            self.quartile_combo,
+            self.min_if_entry,
             limit_entry,
         ]:
             entry.bind("<Return>", lambda event: self.search())
@@ -2444,6 +2526,9 @@ class OrganizerGUI:
             messagebox.showwarning("경고", "출력 폴더를 지정해 주세요.")
             return
 
+        self.venue_var.set(self._normalize_selected_venue(self.venue_var.get()))
+        self._apply_venue_type_rules(self.venue_var.get())
+
         db_path = Path(output).expanduser().resolve() / "LOG" / "paper_index.sqlite3"
         if not db_path.exists():
             self.append_log("[WARN] 검색 인덱스가 없습니다.")
@@ -2457,6 +2542,17 @@ class OrganizerGUI:
             messagebox.showwarning("경고", "최대 건수는 숫자로 입력해 주세요.")
             return
 
+        venue_type = self.venue_type_var.get()
+
+        scie = self.scie_var.get().strip() or None
+        min_if = self.min_if_var.get().strip() or None
+        quartile = self.quartile_var.get().strip() or None
+
+        if venue_type == "conference":
+            scie = None
+            min_if = None
+            quartile = None
+
         index = PaperIndex(db_path)
         try:
             rows = index.search(
@@ -2466,9 +2562,10 @@ class OrganizerGUI:
                 field_code=self.field_var.get().strip() or None,
                 venue=self.venue_var.get().strip() or None,
                 doc_type=self.doc_type_var.get().strip() or None,
-                scie=self.scie_var.get().strip() or None,
-                min_impact_factor=self.min_if_var.get().strip() or None,
-                quartile=self.quartile_var.get().strip() or None,
+                file_path=self.search_file_var.get().strip() or None,
+                scie=scie,
+                min_impact_factor=min_if,
+                quartile=quartile,
                 limit=limit,
             )
         except Exception as exc:
@@ -2503,8 +2600,15 @@ class OrganizerGUI:
             )
             self.snippets[item_id] = row.snippet or ""
 
-        self.status_var.set(f"[SEARCH] 검색 완료: {len(rows)}건")
-        self.append_log(f"[SEARCH] 검색 완료: {len(rows)}건")
+        if venue_type == "conference":
+            status_msg = f"[SEARCH] 학회 기준 검색 완료: {len(rows)}건"
+        elif venue_type == "journal":
+            status_msg = f"[SEARCH] 저널 기준 검색 완료: {len(rows)}건"
+        else:
+            status_msg = f"[SEARCH] 검색 완료: {len(rows)}건"
+
+        self.status_var.set(status_msg)
+        self.append_log(status_msg)
 
         if rows:
             first = self.tree.get_children()[0]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -50,6 +51,18 @@ FIELD_CODES: dict[str, str] = {
 }
 
 
+CONFERENCE_NAMES: list[str] = [
+    "NeurIPS", "ICML", "ICLR", "AAAI", "IJCAI", "AISTATS", "UAI",
+    "ACL", "EMNLP", "NAACL", "COLING", "EACL", "Findings of ACL", "CoNLL", "LREC-COLING", "Interspeech",
+    "CVPR", "ICCV", "ECCV", "WACV", "BMVC", "ACCV",
+    "KDD", "WWW", "The Web Conference", "SIGIR", "CIKM", "WSDM", "ECIR", "RecSys",
+    "SIGMOD", "VLDB", "ICDE", "PODS", "SOSP", "OSDI", "EuroSys", "NSDI",
+    "SIGCOMM", "MobiCom", "USENIX Security", "IEEE Symposium on Security and Privacy", "NDSS", "CCS",
+    "CHI", "UIST", "IROS", "ICRA", "RSS",
+    "ISMB", "MICCAI",
+]
+
+
 @dataclass
 class PaperRow:
     field_code: str
@@ -85,12 +98,92 @@ def normalize_journal_name(name: str) -> str:
     return text
 
 
+def _candidate_journal_metrics_paths(csv_path: str | Path = "journal_metrics.csv") -> list[Path]:
+    raw = Path(csv_path)
+    candidates: list[Path] = []
+
+    if raw.is_absolute():
+        candidates.append(raw)
+    else:
+        module_dir = Path(__file__).resolve().parent
+        cwd = Path.cwd()
+        env_path = os.environ.get("JOURNAL_METRICS_CSV", "").strip()
+
+        if env_path:
+            candidates.append(Path(env_path).expanduser())
+
+        candidates.extend([
+            module_dir / raw,
+            module_dir / "data" / raw.name,
+            module_dir.parent / raw,
+            module_dir.parent / "data" / raw.name,
+            cwd / raw,
+            cwd / "data" / raw.name,
+        ])
+
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for path in candidates:
+        try:
+            resolved = path.expanduser().resolve()
+        except Exception:
+            resolved = path.expanduser()
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(resolved)
+    return deduped
+
+
+
+
+def _resolve_journal_metrics_path(csv_path: str | Path = "journal_metrics.csv") -> Path | None:
+    raw = Path(csv_path)
+    candidates: list[Path] = []
+
+    env_value = os.environ.get("JOURNAL_METRICS_CSV", "").strip()
+    if env_value:
+        candidates.append(Path(env_value).expanduser())
+
+    if raw.is_absolute():
+        candidates.append(raw)
+    else:
+        module_dir = Path(__file__).resolve().parent
+        cwd = Path.cwd()
+        candidates.extend([
+            module_dir / raw,
+            module_dir / "data" / raw.name,
+            module_dir.parent / raw,
+            module_dir.parent / "data" / raw.name,
+            cwd / raw,
+            cwd / "data" / raw.name,
+        ])
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.expanduser().resolve()
+        except Exception:
+            resolved = candidate.expanduser()
+
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        if resolved.exists() and resolved.is_file():
+            return resolved
+
+    return None
+
+
 def load_journal_metrics(csv_path: str | Path = "journal_metrics.csv") -> dict[str, dict[str, str]]:
     data: dict[str, dict[str, str]] = {}
     try:
-        path = Path(csv_path)
-        if not path.is_absolute():
-            path = Path(__file__).resolve().parent / path
+        path = _resolve_journal_metrics_path(csv_path)
+        if path is None:
+            return {}
         with path.open("r", encoding="utf-8-sig", newline="") as f:
             reader = csv.DictReader(f)
             for row in reader:
@@ -119,6 +212,89 @@ def load_journal_metrics(csv_path: str | Path = "journal_metrics.csv") -> dict[s
 
 
 JOURNAL_DB = load_journal_metrics()
+
+
+def load_journal_display_names(csv_path: str | Path = "journal_metrics.csv") -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+
+    try:
+        path = _resolve_journal_metrics_path(csv_path)
+        if path is None:
+            return []
+
+        with path.open("r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                name = str(row.get("Journal Name", "")).strip()
+                if not name:
+                    continue
+
+                key = name.casefold()
+                if key in seen:
+                    continue
+
+                seen.add(key)
+                names.append(name)
+    except Exception:
+        return []
+
+    return sorted(names, key=str.casefold)
+
+
+def load_tagged_venue_display_names(csv_path: str | Path = "journal_metrics.csv") -> list[str]:
+    seen: set[str] = set()
+    tagged_items: list[str] = []
+
+    for name in load_journal_display_names(csv_path):
+        clean_name = str(name).strip()
+        if not clean_name:
+            continue
+        key = clean_name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        tagged_items.append(f"[Journal] {clean_name}")
+
+    for name in CONFERENCE_NAMES:
+        clean_name = str(name).strip()
+        if not clean_name:
+            continue
+        key = clean_name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        tagged_items.append(f"[Conference] {clean_name}")
+
+    return sorted(tagged_items, key=str.casefold)
+
+
+def is_conference_name(name: str) -> bool:
+    target = str(name or "").strip().casefold()
+    if not target:
+        return False
+
+    for conf in CONFERENCE_NAMES:
+        if target == str(conf).strip().casefold():
+            return True
+    return False
+
+
+def is_journal_name(name: str, csv_path: str | Path = "journal_metrics.csv") -> bool:
+    target = normalize_journal_name(name)
+    if not target:
+        return False
+
+    db = load_journal_metrics(csv_path)
+    return target in db
+
+
+def infer_venue_type(name: str, csv_path: str | Path = "journal_metrics.csv") -> str:
+    if is_conference_name(name):
+        return "conference"
+    if is_journal_name(name, csv_path):
+        return "journal"
+    return "unknown"
 
 
 def classify_quartile(impact_factor: str | float | int | None) -> str:
