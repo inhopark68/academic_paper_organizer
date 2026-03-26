@@ -14,6 +14,7 @@ import zipfile
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from urllib.parse import quote_plus
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -28,6 +29,7 @@ from .core import (
     PaperOrganizer,
     repair_and_reindex,
     scan_existing_pdfs,
+    search_pubmed_by_title,
 )
 try:
     from .core import scan_existing_pdfs_fast
@@ -1161,6 +1163,15 @@ class OrganizerGUI:
             command=self.open_selected_doi,
             style_name="Soft.TButton",
             width=10,
+            side="left",
+            padx=6,
+        )
+        self._pack_button(
+            action_row_top,
+            text="선택 파일 PubMed",
+            command=self.open_checked_pubmed,
+            style_name="Blue.TButton",
+            width=16,
             side="left",
             padx=6,
         )
@@ -2543,6 +2554,64 @@ class OrganizerGUI:
             webbrowser.open(self._normalize_doi_url(doi))
         except Exception as exc:
             messagebox.showerror("오류", f"DOI 열기에 실패했습니다: {exc}")
+
+    def _checked_titles(self) -> list[str]:
+        titles: list[str] = []
+        seen: set[str] = set()
+
+        for item_id in self._checked_item_ids():
+            values = self.tree.item(item_id, "values")
+            if not values:
+                continue
+            title = str(values[5]).strip()
+            if not title:
+                continue
+            key = title.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            titles.append(title)
+
+        return titles
+
+    def open_checked_pubmed(self) -> None:
+        titles = self._checked_titles()
+        if not titles:
+            messagebox.showinfo("안내", "먼저 체크할 파일을 선택해 주세요.")
+            return
+
+        email = self.crossref_email_var.get().strip()
+        opened = 0
+        matched = 0
+
+        for title in titles:
+            result = search_pubmed_by_title(title, email=email)
+            url = result.get("url", "").strip()
+            if not url:
+                search_term = f'"{title}"[Title]'
+                url = f"https://pubmed.ncbi.nlm.nih.gov/?term={quote_plus(search_term)}"
+
+            try:
+                webbrowser.open(url)
+                opened += 1
+                if result.get("matched") == "true":
+                    matched += 1
+                    self.append_log(
+                        f"[PUBMED] 직접 매칭: {title} -> PMID {result.get('pmid', '').strip()}"
+                    )
+                else:
+                    if result.get("error"):
+                        self.append_log(
+                            f"[PUBMED] 검색 결과 페이지 열기(오류 fallback): {title} | {result.get('error')}"
+                        )
+                    else:
+                        self.append_log(f"[PUBMED] 검색 결과 페이지 열기: {title}")
+            except Exception as exc:
+                self.append_log(f"[PUBMED-ERROR] {title}: {exc}")
+
+        self.set_status(
+            f"PubMed 열기 완료: {opened}건 열기, 직접 매칭 {matched}건"
+        )
 
     def get_db_path(self) -> Path | None:
         output_dir = self.output_var.get().strip()

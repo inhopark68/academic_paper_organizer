@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
+from urllib.parse import quote_plus
 
 from pypdf import PdfReader
 from watchdog.events import FileSystemEventHandler
@@ -1023,6 +1024,89 @@ def build_snippet(text: str, max_length: int = 500) -> str:
     if len(compact) <= max_length:
         return compact
     return compact[: max_length - 3].rstrip() + "..."
+
+def build_pubmed_search_term(title: str) -> str:
+    cleaned = re.sub(r"\s+", " ", title or "").strip()
+    if not cleaned:
+        return ""
+    return f'"{cleaned}"[Title]'
+
+
+def build_pubmed_search_url(title: str) -> str:
+    term = build_pubmed_search_term(title)
+    return f"https://pubmed.ncbi.nlm.nih.gov/?term={quote_plus(term)}"
+
+
+def build_pubmed_article_url(pmid: str) -> str:
+    return f"https://pubmed.ncbi.nlm.nih.gov/{str(pmid).strip()}/"
+
+
+def search_pubmed_by_title(
+    title: str,
+    *,
+    email: str = "",
+    tool: str = "academic_paper_organizer",
+    timeout: int = 15,
+) -> dict[str, str]:
+    cleaned = re.sub(r"\s+", " ", title or "").strip()
+    if not cleaned:
+        return {
+            "title": "",
+            "matched": "false",
+            "pmid": "",
+            "url": "",
+            "search_url": "",
+            "error": "empty_title",
+        }
+
+    search_url = build_pubmed_search_url(cleaned)
+    params = {
+        "db": "pubmed",
+        "term": build_pubmed_search_term(cleaned),
+        "retmode": "json",
+        "retmax": 1,
+        "sort": "relevance",
+        "tool": tool,
+    }
+    if email:
+        params["email"] = email
+
+    try:
+        response = requests.get(
+            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
+            params=params,
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        idlist = (((payload or {}).get("esearchresult") or {}).get("idlist") or [])
+        if idlist:
+            pmid = str(idlist[0]).strip()
+            return {
+                "title": cleaned,
+                "matched": "true",
+                "pmid": pmid,
+                "url": build_pubmed_article_url(pmid),
+                "search_url": search_url,
+                "error": "",
+            }
+        return {
+            "title": cleaned,
+            "matched": "false",
+            "pmid": "",
+            "url": search_url,
+            "search_url": search_url,
+            "error": "",
+        }
+    except Exception as exc:
+        return {
+            "title": cleaned,
+            "matched": "false",
+            "pmid": "",
+            "url": search_url,
+            "search_url": search_url,
+            "error": str(exc),
+        }
 
 
 def extract_paper_metadata(pdf_path: Path) -> dict[str, str]:
