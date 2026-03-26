@@ -7,17 +7,16 @@ import shutil
 import sqlite3
 import threading
 import time
-import requests
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
-from urllib.parse import quote_plus, quote, urljoin
+from urllib.parse import quote, quote_plus, urljoin
 
+import pandas as pd
+import requests
 from bs4 import BeautifulSoup
-
 from playwright.sync_api import sync_playwright
-
 from pypdf import PdfReader
 from watchdog.events import FileSystemEventHandler
 
@@ -120,6 +119,35 @@ def load_journal_metrics(csv_path: str | Path = "journal_metrics.csv") -> dict[s
 
 
 JOURNAL_DB = load_journal_metrics()
+
+
+def classify_quartile(impact_factor: str | float | int | None) -> str:
+    """
+    Impact Factor 값을 기준으로 보수적으로 사분위 라벨을 추정한다.
+    실제 JCR quartile 값이 있으면 그 값을 우선 사용해야 하며,
+    이 함수는 fallback 용도다.
+    """
+    if impact_factor is None:
+        return ""
+
+    text = str(impact_factor).strip()
+    if not text:
+        return ""
+
+    try:
+        value = float(text)
+    except Exception:
+        return ""
+
+    if value >= 10:
+        return "Q1"
+    if value >= 5:
+        return "Q2"
+    if value >= 2:
+        return "Q3"
+    if value > 0:
+        return "Q4"
+    return ""
 
 
 def fetch_openalex_journal_metrics(venue: str) -> tuple[str, str, str, str]:
@@ -1793,14 +1821,13 @@ class PDFCreatedHandler(FileSystemEventHandler):
         return
 
 
-def scan_existing_pdfs(
+def scan_existing_pdfs_legacy(
     organizer: PaperOrganizer,
     root_dir: Path,
     log_fn: Callable[[str], None] | None = None,
 ) -> None:
     root_dir = Path(root_dir).resolve()
     logger = log_fn or (lambda msg: None)
-    progress = progress_fn or (lambda msg: None)
 
     count = 0
     for pdf_path in root_dir.rglob("*.pdf"):
@@ -1850,11 +1877,12 @@ def repair_misplaced_year_folders(
             continue
 
         parts = rel.parts
-        if len(parts) < 3:
+        if len(parts) < 4:
             continue
 
-        current_field = parts[0]
-        current_year = parts[1]
+        current_doc_type = parts[0]
+        current_field = parts[1]
+        current_year = parts[2]
 
         meta = extract_paper_metadata(pdf_path)
         repaired_year = normalize_year(meta.get("year"))
@@ -1866,10 +1894,11 @@ def repair_misplaced_year_folders(
         if repaired_year == current_year:
             continue
 
-        current_doc_type = str(meta.get("doc_type", "unknown")).strip() or "unknown"
+        inferred_doc_type = str(meta.get("doc_type", "")).strip()
+        target_doc_type = inferred_doc_type if inferred_doc_type in {"academic", "non_academic", "unknown"} else current_doc_type
         target_pdf = build_output_pdf_path(
             output_dir,
-            current_doc_type,
+            target_doc_type,
             current_field,
             repaired_year,
             pdf_path,
@@ -2255,10 +2284,143 @@ def _safe_filename(text: str) -> str:
     text = re.sub(r'\s+', '_', text)
     return text[:120] or 'professors'
 
+
+import re
+import json
+from pathlib import Path
+from typing import Callable
+from urllib.parse import urljoin
+
+import pandas as pd
+import requests
+from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
+
+
 YONSEI_MEDICINE_PROFESSOR_INDEX_URLS = [
-    "https://medicine.yonsei.ac.kr/medicine/research/basic.do",          # 기초의학교실
-    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic.do",  # 임상의학교실
-    "https://medicine.yonsei.ac.kr/medicine/about/professor/humanities.do",  # 인문의학교실
+    "https://medicine.yonsei.ac.kr/medicine/research/basic/microbiology.do",
+    "https://medicine.yonsei.ac.kr/medicine/research/basic/pathology.do",
+    "https://medicine.yonsei.ac.kr/medicine/research/basic/Physiology.do",
+    "https://medicine.yonsei.ac.kr/medicine/research/basic/biochemistry-molecular-biology.do",
+    "https://medicine.yonsei.ac.kr/medicine/research/basic/pharmacology.do",
+    "https://medicine.yonsei.ac.kr/medicine/research/basic/tropical-medicine.do",
+    "https://medicine.yonsei.ac.kr/medicine/research/basic/preventive.do",
+    "https://medicine.yonsei.ac.kr/medicine/research/basic/biomedical-science.do",
+    "https://medicine.yonsei.ac.kr/medicine/research/basic/systems-informatics.do",
+    "https://medicine.yonsei.ac.kr/medicine/research/basic/euyong.do",
+    "https://medicine.yonsei.ac.kr/medicine/research/basic/anatomy.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/family.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/internal-medicine.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/anesthesiology-pain-medicine.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/radiation-oncology.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/urology.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/obstetrics-gynecology.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/plastic-reconstructive-surgery.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/juveniles.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/neurology.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/neurosurgery.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/ophthalmology.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/radiology.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/surgery.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/emergency.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/otorhinolaryngology.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/hospital-medicine.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/rehabilitation.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/psychiatry.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/orthopedic-surgery.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/laboratory.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/dermatology.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/nuclearMedicine.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/chest-surgery.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/infectious-disease.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/endocrinology.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/geriatrics.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/rheumatology.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/gastroenterology.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/nephrology.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/cardiology.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/allergy.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/oncology.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/integrated-medicine.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/hematology.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/pumonology.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/hepatobiliary-pancreatic-surgery.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/thyroid-endocrine-surgery.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/colorectal-surgery.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/pediatric-surgery.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/gastrointestinal-surgery.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/breast-surgery.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/transplantation-surgery.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/trauma-surgery.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/humanities/forensic-medicine.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/humanities/medical-education.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/humanities/humanities-social.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/humanities/law-moral.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/humanities/medical-history.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/humanities/korea-unification-global-health.do"
+]
+
+YONSEI_MEDICINE_DEPARTMENT_URLS = [
+    "https://medicine.yonsei.ac.kr/medicine/research/basic/microbiology.do",
+    "https://medicine.yonsei.ac.kr/medicine/research/basic/pathology.do",
+    "https://medicine.yonsei.ac.kr/medicine/research/basic/Physiology.do",
+    "https://medicine.yonsei.ac.kr/medicine/research/basic/biochemistry-molecular-biology.do",
+    "https://medicine.yonsei.ac.kr/medicine/research/basic/pharmacology.do",
+    "https://medicine.yonsei.ac.kr/medicine/research/basic/tropical-medicine.do",
+    "https://medicine.yonsei.ac.kr/medicine/research/basic/preventive.do",
+    "https://medicine.yonsei.ac.kr/medicine/research/basic/biomedical-science.do",
+    "https://medicine.yonsei.ac.kr/medicine/research/basic/systems-informatics.do",
+    "https://medicine.yonsei.ac.kr/medicine/research/basic/euyong.do",
+    "https://medicine.yonsei.ac.kr/medicine/research/basic/anatomy.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/family.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/internal-medicine.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/anesthesiology-pain-medicine.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/radiation-oncology.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/urology.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/obstetrics-gynecology.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/plastic-reconstructive-surgery.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/juveniles.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/neurology.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/neurosurgery.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/ophthalmology.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/radiology.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/surgery.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/emergency.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/otorhinolaryngology.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/hospital-medicine.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/rehabilitation.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/psychiatry.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/orthopedic-surgery.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/laboratory.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/dermatology.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/nuclearMedicine.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/chest-surgery.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/infectious-disease.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/endocrinology.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/geriatrics.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/rheumatology.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/gastroenterology.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/nephrology.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/cardiology.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/allergy.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/oncology.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/integrated-medicine.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/hematology.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/pumonology.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/hepatobiliary-pancreatic-surgery.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/thyroid-endocrine-surgery.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/colorectal-surgery.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/pediatric-surgery.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/gastrointestinal-surgery.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/breast-surgery.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/transplantation-surgery.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/trauma-surgery.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/humanities/forensic-medicine.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/humanities/medical-education.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/humanities/humanities-social.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/humanities/law-moral.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/humanities/medical-history.do",
+    "https://medicine.yonsei.ac.kr/medicine/about/professor/humanities/korea-unification-global-health.do"
 ]
 
 BAD_NAME_WORDS = {
@@ -2380,6 +2542,47 @@ def _extract_names_from_rendered_html(html: str) -> list[str]:
     return deduped
 
 
+def _slugify_debug_name(text: str) -> str:
+    s = re.sub(r"[^\w가-힣\-\.]+", "_", str(text or "").strip())
+    s = re.sub(r"_+", "_", s).strip("_")
+    return s[:80] or "page"
+
+
+def _save_debug_page(page, debug_dir: Path, tag: str) -> None:
+    try:
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        slug = _slugify_debug_name(tag)
+        (debug_dir / f"{slug}.html").write_text(page.content(), encoding="utf-8")
+        page.screenshot(path=str(debug_dir / f"{slug}.png"), full_page=True)
+    except Exception:
+        pass
+
+
+def _load_manual_department_urls() -> dict[str, str]:
+    pages: dict[str, str] = {}
+
+    for url in YONSEI_MEDICINE_DEPARTMENT_URLS:
+        u = str(url or "").strip()
+        if not u:
+            continue
+        dept = Path(u).stem
+        pages.setdefault(u, dept)
+
+    txt_path = Path(__file__).resolve().parent / "yonsei_department_urls.txt"
+    if txt_path.exists():
+        try:
+            for line in txt_path.read_text(encoding="utf-8").splitlines():
+                u = line.strip()
+                if not u or u.startswith("#"):
+                    continue
+                dept = Path(u).stem
+                pages.setdefault(u, dept)
+        except Exception:
+            pass
+
+    return pages
+
+
 def _collect_department_links(page, index_url: str) -> dict[str, str]:
     links: dict[str, str] = {}
 
@@ -2418,7 +2621,12 @@ def _collect_department_links(page, index_url: str) -> dict[str, str]:
     return links
 
 
-def fetch_latest_yonsei_professors(*, logger: Callable[[str], None] | None = None, timeout_ms: int = 20000) -> list[dict[str, str]]:
+def fetch_latest_yonsei_professors(
+    *,
+    logger: Callable[[str], None] | None = None,
+    timeout_ms: int = 20000,
+    debug_dir: str | Path | None = None,
+) -> list[dict[str, str]]:
     def _log(msg: str) -> None:
         if logger:
             logger(msg)
@@ -2426,33 +2634,59 @@ def fetch_latest_yonsei_professors(*, logger: Callable[[str], None] | None = Non
     rows: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
     department_pages: dict[str, str] = {}
+    index_link_count = 0
+    dept_name_count = 0
+
+    if debug_dir is None:
+        debug_path = Path(__file__).resolve().parent / "_debug_yonsei"
+    else:
+        debug_path = Path(debug_dir)
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context()
         page = context.new_page()
 
-        for index_url in YONSEI_MEDICINE_PROFESSOR_INDEX_URLS:
+        for idx, index_url in enumerate(YONSEI_MEDICINE_PROFESSOR_INDEX_URLS, start=1):
             try:
                 page.goto(index_url, wait_until="networkidle", timeout=timeout_ms)
-                page.wait_for_timeout(1500)
+                page.wait_for_timeout(2000)
+                _save_debug_page(page, debug_path, f"index_{idx}")
+
                 found = _collect_department_links(page, index_url)
+                index_link_count += len(found)
                 department_pages.update(found)
+
                 _log(f"[YONSEI] 인덱스 수집: {index_url} -> {len(found)}개 교실")
+                for u, d in found.items():
+                    _log(f"[YONSEI] 교실 링크: {d} | {u}")
+
             except Exception as exc:
                 _log(f"[YONSEI-WARN] 인덱스 조회 실패: {index_url} | {exc}")
 
-        for page_url, dept_name in department_pages.items():
+        if not department_pages:
+            manual_pages = _load_manual_department_urls()
+            if manual_pages:
+                department_pages.update(manual_pages)
+                _log(f"[YONSEI] 자동수집 0건 -> 수동 시드 사용: {len(manual_pages)}개")
+                for u, d in manual_pages.items():
+                    _log(f"[YONSEI] 수동 시드: {d} | {u}")
+
+        for n, (page_url, dept_name) in enumerate(department_pages.items(), start=1):
             try:
                 page.goto(page_url, wait_until="networkidle", timeout=timeout_ms)
-                page.wait_for_timeout(2000)
+                page.wait_for_timeout(2500)
+                _save_debug_page(page, debug_path, f"dept_{n}_{dept_name}")
 
                 html = page.content()
                 names = _extract_names_from_rendered_html(html)
 
+                _log(f"[YONSEI] {dept_name}: 이름 후보 {len(names)}명")
+
                 if not names:
-                    _log(f"[YONSEI-WARN] 교수명 추출 실패: {dept_name} | {page_url}")
                     continue
+
+                dept_name_count += len(names)
 
                 for name in names:
                     query = _normalize_professor_name_for_query(name)
@@ -2473,18 +2707,31 @@ def fetch_latest_yonsei_professors(*, logger: Callable[[str], None] | None = Non
                         "orcid": "",
                     })
 
-                _log(f"[YONSEI] {dept_name}: 교수 후보 {len(names)}명")
-
             except Exception as exc:
                 _log(f"[YONSEI-WARN] 교수 페이지 조회 실패: {dept_name} | {page_url} | {exc}")
 
         browser.close()
 
     if not rows:
+        summary = {
+            "index_link_count": index_link_count,
+            "department_page_count": len(department_pages),
+            "name_candidate_count": dept_name_count,
+            "debug_dir": str(debug_path),
+        }
+        try:
+            debug_path.mkdir(parents=True, exist_ok=True)
+            (debug_path / "summary.json").write_text(
+                json.dumps(summary, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
         raise RuntimeError(
             "연세대 교수명단을 0건 가져왔습니다. "
-            "현재 사이트는 requests 기반 정적 파싱으로는 동작하지 않아 "
-            "브라우저 렌더링이 필요합니다."
+            f"인덱스링크={index_link_count}, 교실페이지={len(department_pages)}, 이름후보={dept_name_count}. "
+            f"디버그 파일 확인: {debug_path}"
         )
 
     rows.sort(key=lambda row: (row.get("department", ""), row.get("name", "")))
@@ -2498,20 +2745,81 @@ def validate_exported_rows(rows: list[dict[str, str]]) -> None:
         raise ValueError(f"교수 명단 오염 감지: bad_rows={len(polluted)}")
 
 
-def export_latest_yonsei_professors_csv(output_csv: str | Path, *, logger: Callable[[str], None] | None = None) -> dict[str, int | str]:
-    rows = fetch_latest_yonsei_professors(logger=logger)
-    validate_exported_rows(rows)
+
+
+def categorize_yonsei_professor_group(source_url: str, department: str = "") -> str:
+    url = str(source_url or "").lower()
+    dept = str(department or "").strip()
+
+    if "/medicine/research/basic/" in url:
+        return "기초의학"
+    if "/medicine/about/professor/clinic/" in url:
+        return "임상의학"
+    if "/medicine/about/professor/humanities/" in url:
+        return "인문의학"
+
+    basic_keywords = ["해부", "생리", "약리", "미생물", "병리", "예방", "생화학", "의생명", "시스템", "열대", "의용"]
+    humanities_keywords = ["법", "윤리", "의학교육", "의사학", "인문", "사회", "통일", "global health", "forensic"]
+    clinic_keywords = ["내과", "외과", "정형", "정신", "영상", "마취", "산부인과", "비뇨", "소아", "피부", "재활", "응급", "안과", "이비인후", "신경", "흉부", "진단", "방사선", "가정", "검사의학"]
+
+    if any(k in dept for k in basic_keywords):
+        return "기초의학"
+    if any(k in dept for k in humanities_keywords):
+        return "인문의학"
+    if any(k in dept for k in clinic_keywords):
+        return "임상의학"
+    return "전체"
+
+
+def export_latest_yonsei_professors_csv(
+    output_csv: str | Path,
+    *,
+    logger: Callable[[str], None] | None = None,
+) -> dict[str, int | str]:
     output_csv = Path(output_csv)
+    debug_dir = output_csv.parent / "_debug_yonsei"
+
+    rows = fetch_latest_yonsei_professors(
+        logger=logger,
+        debug_dir=debug_dir,
+    )
+    validate_exported_rows(rows)
+
     output_csv.parent.mkdir(parents=True, exist_ok=True)
 
-    fieldnames = ["name", "query", "department", "affiliation", "source_url", "orcid"]
-    with output_csv.open("w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
+    normalized_rows: list[dict[str, str]] = []
+    for row in rows:
+        normalized_rows.append({
+            "group": categorize_yonsei_professor_group(
+                row.get("source_url", ""),
+                row.get("department", ""),
+            ),
+            "name": row.get("name", ""),
+            "query": row.get("query", ""),
+            "department": row.get("department", ""),
+            "affiliation": row.get("affiliation", ""),
+            "source_url": row.get("source_url", ""),
+            "orcid": row.get("orcid", ""),
+        })
+
+    df = pd.DataFrame(normalized_rows, columns=[
+        "group",
+        "name",
+        "query",
+        "department",
+        "affiliation",
+        "source_url",
+        "orcid",
+    ])
+    df.to_csv(output_csv, index=False, encoding="utf-8-sig")
+
+    if logger:
+        logger(f"[YONSEI] CSV 저장 완료: {output_csv} ({len(df)} rows)")
+        logger(f"[YONSEI] 디버그 폴더: {debug_dir}")
 
     return {
-        "professors": len(rows),
+        "rows": len(df),
+        "professors": len(df),
         "output_csv": str(output_csv),
     }
 
@@ -2530,6 +2838,7 @@ def load_professors_file(file_path: str | Path) -> list[dict[str, str]]:
                 'query': name,
                 'department': '',
                 'affiliation': 'Yonsei OR Severance',
+                'group': '',
                 'orcid': '',
             })
         return entries
@@ -2565,6 +2874,16 @@ def load_professors_file(file_path: str | Path) -> list[dict[str, str]]:
                 or row.get('기관필터')
                 or 'Yonsei OR Severance'
             ).strip()
+            group = str(
+                row.get('group')
+                or row.get('Group')
+                or row.get('category')
+                or row.get('Category')
+                or row.get('division')
+                or row.get('Division')
+                or row.get('구분')
+                or ''
+            ).strip()
             orcid = str(
                 row.get('orcid')
                 or row.get('ORCID')
@@ -2582,6 +2901,7 @@ def load_professors_file(file_path: str | Path) -> list[dict[str, str]]:
                 'query': query or name,
                 'department': department,
                 'affiliation': affiliation or 'Yonsei OR Severance',
+                'group': group,
                 'orcid': normalize_orcid(orcid),
             })
 
@@ -2929,13 +3249,33 @@ def export_professor_achievements_csv(
     *,
     email: str = '',
     per_professor_limit: int = 20,
+    group_filter: str = '전체',
     logger: Callable[[str], None] | None = None,
-) -> dict[str, int]:
+) -> dict[str, int | str]:
     def _log(msg: str) -> None:
         if logger:
             logger(msg)
 
     professors = load_professors_file(professors_file)
+
+    normalized_group_filter = str(group_filter or '전체').strip() or '전체'
+    valid_groups = {'전체', '기초의학', '임상의학', '인문의학'}
+    if normalized_group_filter not in valid_groups:
+        normalized_group_filter = '전체'
+
+    if normalized_group_filter != '전체':
+        filtered_professors: list[dict[str, str]] = []
+        for professor in professors:
+            professor_group = str(professor.get('group', '')).strip()
+            if not professor_group:
+                professor_group = categorize_yonsei_professor_group('', professor.get('department', ''))
+            if professor_group == normalized_group_filter:
+                filtered_professors.append(professor)
+        professors = filtered_professors
+        _log(f'[PROF] 구분 필터 적용: {normalized_group_filter} | 대상 교수 {len(professors)}명')
+    else:
+        _log(f'[PROF] 구분 필터 적용 안 함: {normalized_group_filter} | 대상 교수 {len(professors)}명')
+
     output_csv = Path(output_csv)
     output_csv.parent.mkdir(parents=True, exist_ok=True)
 
@@ -2996,6 +3336,7 @@ def export_professor_achievements_csv(
                     'author_role_basis': role_basis,
                     'professor_query': query,
                     'professor_orcid': professor_orcid,
+                    'group': normalized_group_filter if normalized_group_filter != '전체' else (professor.get('group', '') or categorize_yonsei_professor_group('', department)),
                     'department': department,
                     'affiliation_filter': affiliation,
                     'pmid': pmid,
@@ -3027,6 +3368,7 @@ def export_professor_achievements_csv(
         'author_role_basis',
         'professor_query',
         'professor_orcid',
+        'group',
         'department',
         'affiliation_filter',
         'pmid',
@@ -3054,5 +3396,6 @@ def export_professor_achievements_csv(
         'professors': professor_count,
         'papers': paper_count,
         'errors': error_count,
+        'group_filter': normalized_group_filter,
         'output_csv': str(output_csv),
     }

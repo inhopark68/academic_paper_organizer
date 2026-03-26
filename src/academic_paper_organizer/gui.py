@@ -204,6 +204,7 @@ class OrganizerGUI:
         self.unknown_count_var = tk.StringVar(value="미분류: 0건")
 
         self.prof_csv_path_var = tk.StringVar(value="불러온 교수성과 CSV 없음")
+        self.prof_group_var = tk.StringVar(value="전체")
         self.prof_count_var = tk.StringVar(value="교수 수: 0명")
         self.prof_paper_count_var = tk.StringVar(value="논문 수: 0건")
 
@@ -233,6 +234,7 @@ class OrganizerGUI:
         self.sort_state: dict[str, bool] = {}
         self.current_sort_column: str | None = None
         self.checked_items: set[str] = set()
+        self.prof_checked_items: set[str] = set()
 
         self.use_boxed_widgets = True
 
@@ -1449,6 +1451,16 @@ class OrganizerGUI:
             width=18,
             side="left",
         )
+
+        ttk.Label(top_row, text="생성 구분").pack(side="left", padx=(10, 6))
+        self.prof_group_combo = ttk.Combobox(
+            top_row,
+            textvariable=self.prof_group_var,
+            values=["전체", "기초의학", "임상의학", "인문의학"],
+            state="readonly",
+            width=12,
+        )
+        self.prof_group_combo.pack(side="left", padx=(0, 6))
         self._pack_button(
             top_row,
             text="교수성과 CSV 생성",
@@ -1460,10 +1472,37 @@ class OrganizerGUI:
         )
         self._pack_button(
             top_row,
+            text="구분별 4개 CSV 일괄 생성",
+            command=self.export_professor_achievements_all_groups,
+            style_name="Orange.TButton",
+            width=22,
+            side="left",
+            padx=6,
+        )
+        self._pack_button(
+            top_row,
             text="교수성과 CSV 불러오기",
             command=self.load_professor_achievements_csv,
             style_name="Blue.TButton",
             width=18,
+            side="left",
+            padx=6,
+        )
+        self._pack_button(
+            top_row,
+            text="선택 토글",
+            command=self._toggle_checked_professor_selection,
+            style_name="Soft.TButton",
+            width=12,
+            side="left",
+            padx=6,
+        )
+        self._pack_button(
+            top_row,
+            text="선택된 성과 지우기",
+            command=self._delete_checked_professor_rows,
+            style_name="Red.TButton",
+            width=16,
             side="left",
             padx=6,
         )
@@ -1506,9 +1545,11 @@ class OrganizerGUI:
         self.prof_tree = ttk.Treeview(
             tree_frame,
             columns=self.prof_columns,
-            show="headings",
-            selectmode="browse",
+            show="tree headings",
+            selectmode="extended",
         )
+        self.prof_tree.heading("#0", text="선택")
+        self.prof_tree.column("#0", width=64, minwidth=56, anchor="center", stretch=False)
 
         headings = {
             "professor": "교수명",
@@ -1550,14 +1591,79 @@ class OrganizerGUI:
         self.prof_tree.pack(side="left", fill="both", expand=True)
 
         self.prof_tree.bind("<Double-1>", self._open_selected_professor_achievement)
+        self.prof_tree.bind("<Button-1>", self._on_prof_tree_click, add="+")
+        self.prof_tree.bind("<space>", self._toggle_checked_professor_selection)
 
     def _clear_professor_table(self) -> None:
         if hasattr(self, "prof_tree"):
             for item in self.prof_tree.get_children():
                 self.prof_tree.delete(item)
+        self.prof_checked_items.clear()
         self.prof_csv_path_var.set("불러온 교수성과 CSV 없음")
         self.prof_count_var.set("교수 수: 0명")
         self.prof_paper_count_var.set("논문 수: 0건")
+
+    def _set_prof_item_checked(self, item_id: str, checked: bool) -> None:
+        if checked:
+            self.prof_checked_items.add(item_id)
+            self.prof_tree.item(item_id, text="☑")
+        else:
+            self.prof_checked_items.discard(item_id)
+            self.prof_tree.item(item_id, text="☐")
+
+    def _checked_prof_item_ids(self) -> list[str]:
+        if not hasattr(self, "prof_tree"):
+            return []
+        valid_items = set(self.prof_tree.get_children())
+        stale = [item_id for item_id in self.prof_checked_items if item_id not in valid_items]
+        for item_id in stale:
+            self.prof_checked_items.discard(item_id)
+        return [item_id for item_id in self.prof_tree.get_children() if item_id in self.prof_checked_items]
+
+    def _on_prof_tree_click(self, event):
+        if not hasattr(self, "prof_tree"):
+            return None
+        region = self.prof_tree.identify("region", event.x, event.y)
+        column = self.prof_tree.identify_column(event.x)
+        item_id = self.prof_tree.identify_row(event.y)
+
+        if region == "tree" and column == "#0" and item_id:
+            self._set_prof_item_checked(item_id, item_id not in self.prof_checked_items)
+            return "break"
+        return None
+
+    def _toggle_checked_professor_selection(self, event=None):
+        if not hasattr(self, "prof_tree"):
+            return "break"
+        selected = list(self.prof_tree.selection())
+        if not selected:
+            return "break"
+
+        should_check = any(item_id not in self.prof_checked_items for item_id in selected)
+        for item_id in selected:
+            self._set_prof_item_checked(item_id, should_check)
+        return "break"
+
+    def _delete_checked_professor_rows(self) -> None:
+        if not hasattr(self, "prof_tree"):
+            return
+
+        checked = self._checked_prof_item_ids()
+        if not checked:
+            messagebox.showwarning("알림", "먼저 지울 교수 성과를 선택하세요.")
+            return
+
+        if not messagebox.askyesno("확인", f"선택된 교수 성과 {len(checked)}건을 표에서 지울까요?"):
+            return
+
+        for item_id in checked:
+            if item_id in self.prof_tree.get_children():
+                self.prof_tree.delete(item_id)
+            self.prof_checked_items.discard(item_id)
+
+        self._update_professor_dashboard()
+        self.append_log(f"[PROF-TABLE] 선택된 교수 성과 삭제: {len(checked)}건")
+        self.set_status(f"선택된 교수 성과 삭제 완료: {len(checked)}건")
 
     def _update_professor_dashboard(self) -> None:
         if not hasattr(self, "prof_tree"):
@@ -1601,6 +1707,7 @@ class OrganizerGUI:
                 self.prof_tree.insert(
                     "",
                     "end",
+                    text="☐",
                     values=(
                         professor,
                         department,
@@ -2959,6 +3066,101 @@ class OrganizerGUI:
         threading.Thread(target=worker, daemon=True).start()
 
 
+    def export_professor_achievements_all_groups(self) -> None:
+        professors_file = self._get_selected_professors_file()
+        if not professors_file:
+            messagebox.showwarning(
+                "교수 목록 필요",
+                "먼저 최신 교수명단을 가져오거나 교수 목록 CSV를 선택하세요.",
+            )
+            return
+
+        try:
+            per_professor_limit = int(
+                simpledialog.askstring(
+                    "구분별 4개 CSV 일괄 생성",
+                    "교수 1인당 최대 논문 수를 입력하세요.",
+                    initialvalue="20",
+                    parent=self.root,
+                )
+                or "20"
+            )
+        except Exception:
+            per_professor_limit = 20
+
+        per_professor_limit = max(1, min(per_professor_limit, 200))
+
+        default_dir = Path(self.output_var.get().strip() or str(Path(professors_file).parent))
+        base_dir = filedialog.askdirectory(
+            title="구분별 교수성과 CSV 저장 폴더 선택",
+            initialdir=str(default_dir),
+            mustexist=False,
+        )
+        if not base_dir:
+            return
+
+        email = self.crossref_email_var.get().strip()
+        groups = ["전체", "기초의학", "임상의학", "인문의학"]
+        group_slug = {
+            "전체": "all",
+            "기초의학": "basic",
+            "임상의학": "clinical",
+            "인문의학": "humanities",
+        }
+        timestamp = time.strftime('%Y%m%d_%H%M%S')
+        base_path = Path(base_dir)
+
+        self.set_status("구분별 교수성과 CSV 일괄 생성 중...")
+        self.append_log(f"[PROF-BATCH] 교수 목록 파일: {professors_file}")
+        self.append_log(f"[PROF-BATCH] 저장 폴더: {base_path}")
+
+        def worker() -> None:
+            results: list[tuple[str, Path, dict[str, int | str]]] = []
+            try:
+                for group in groups:
+                    slug = group_slug[group]
+                    output_csv = base_path / f"yonsei_professor_achievements_{slug}_{timestamp}.csv"
+                    self.append_log(f"[PROF-BATCH] 생성 시작: {group} -> {output_csv}")
+                    result = export_professor_achievements_csv(
+                        professors_file,
+                        output_csv,
+                        email=email,
+                        per_professor_limit=per_professor_limit,
+                        group_filter=group,
+                        logger=self.append_log,
+                    )
+                    results.append((group, output_csv, result))
+
+                summary_lines = []
+                for group, output_csv, result in results:
+                    summary_lines.append(
+                        f"- {group}: 교수 {result.get('professors', 0)}명 | 논문 {result.get('papers', 0)}건 | 오류 {result.get('errors', 0)}건\n  {output_csv}"
+                    )
+
+                summary_text = "\n\n".join(summary_lines)
+                self.root.after(
+                    0,
+                    lambda: self.set_status("구분별 교수성과 CSV 4종 생성 완료"),
+                )
+                self.root.after(
+                    0,
+                    lambda: messagebox.showinfo(
+                        "완료",
+                        "구분별 교수성과 CSV 생성이 완료되었습니다.\n\n" + summary_text,
+                    ),
+                )
+            except Exception as exc:
+                self.append_log(f"[PROF-BATCH-ERROR] {exc}")
+                self.root.after(
+                    0,
+                    lambda: messagebox.showerror(
+                        "오류", f"구분별 교수성과 CSV 생성 중 오류가 발생했습니다:\n{exc}"
+                    ),
+                )
+                self.root.after(0, lambda: self.set_status("구분별 교수성과 CSV 생성 실패"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def export_professor_achievements(self) -> None:
         professors_file = filedialog.askopenfilename(
             title="교수 목록 파일 선택 (최신 명단은 '최신 교수명단 가져오기'로 먼저 생성)",
@@ -2971,6 +3173,8 @@ class OrganizerGUI:
         )
         if not professors_file:
             return
+
+        selected_group = (self.prof_group_var.get() or "전체").strip() or "전체"
 
         try:
             per_professor_limit = int(
@@ -2988,7 +3192,8 @@ class OrganizerGUI:
         per_professor_limit = max(1, min(per_professor_limit, 200))
 
         default_dir = Path(self.output_var.get().strip() or str(Path(professors_file).parent))
-        default_name = f"yonsei_professor_achievements_{time.strftime('%Y%m%d_%H%M%S')}"
+        group_slug = {"전체": "all", "기초의학": "basic", "임상의학": "clinical", "인문의학": "humanities"}.get(selected_group, "all")
+        default_name = f"yonsei_professor_achievements_{group_slug}_{time.strftime('%Y%m%d_%H%M%S')}"
         output_csv = filedialog.asksaveasfilename(
             title="교수 연구성과 CSV 저장",
             defaultextension=".csv",
@@ -3000,8 +3205,9 @@ class OrganizerGUI:
             return
 
         email = self.crossref_email_var.get().strip()
-        self.set_status("연세의대 교수 연구성과 CSV 생성 중...")
+        self.set_status(f"연세의대 교수 연구성과 CSV 생성 중... ({selected_group})")
         self.append_log(f"[PROF] 교수 목록 파일: {professors_file}")
+        self.append_log(f"[PROF] 생성 구분: {selected_group}")
 
         def worker() -> None:
             try:
@@ -3010,12 +3216,13 @@ class OrganizerGUI:
                     output_csv,
                     email=email,
                     per_professor_limit=per_professor_limit,
+                    group_filter=selected_group,
                     logger=self.append_log,
                 )
                 self.root.after(
                     0,
                     lambda: self.set_status(
-                        f"교수성과 CSV 완료: 교수 {result.get('professors', 0)}명 | 논문 {result.get('papers', 0)}건 | 오류 {result.get('errors', 0)}건"
+                        f"교수성과 CSV 완료({selected_group}): 교수 {result.get('professors', 0)}명 | 논문 {result.get('papers', 0)}건 | 오류 {result.get('errors', 0)}건"
                     ),
                 )
                 self.root.after(
@@ -3023,6 +3230,7 @@ class OrganizerGUI:
                     lambda: messagebox.showinfo(
                         "완료",
                         "교수 연구성과 CSV 생성이 완료되었습니다.\n\n"
+                        f"구분: {selected_group}\n"
                         f"저장 파일: {output_csv}",
                     ),
                 )
