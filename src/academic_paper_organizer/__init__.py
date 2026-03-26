@@ -1,1 +1,0 @@
-"""academic_paper_organizer package."""

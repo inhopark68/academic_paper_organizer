@@ -29,6 +29,10 @@ from .core import (
     repair_and_reindex,
     scan_existing_pdfs,
 )
+try:
+    from .core import scan_existing_pdfs_fast
+except Exception:
+    scan_existing_pdfs_fast = None
 
 
 @dataclass
@@ -179,6 +183,8 @@ class OrganizerGUI:
         )
 
         self.status_var = tk.StringVar(value="대기 중")
+        self.progress_var = tk.StringVar(value="진행률: 대기 중")
+        self.scan_counter_var = tk.StringVar(value="처리 0 | skip 0 | 오류 0")
 
         self.result_count_var = tk.StringVar(value="검색 결과: 0건")
         self.academic_count_var = tk.StringVar(value="학술 논문: 0건")
@@ -205,6 +211,7 @@ class OrganizerGUI:
         self.organizer: PaperOrganizer | None = None
         self.worker_thread: threading.Thread | None = None
         self.cancel_event = threading.Event()
+        self.pause_event = threading.Event()
 
         self.snippets: dict[str, str] = {}
         self.sort_state: dict[str, bool] = {}
@@ -218,6 +225,7 @@ class OrganizerGUI:
         self._format_selected_subdirs_label()
         self._on_watch_option_changed()
         self._update_button_states()
+        self._reset_progress_text()
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.after(150, self._drain_log_queue)
@@ -651,6 +659,22 @@ class OrganizerGUI:
         btn.pack(side=side, padx=padx, pady=pady)
         return btn
 
+
+    def _set_progress_text(self, text: str) -> None:
+        self.root.after(0, lambda: self.progress_var.set(f"진행률: {text}"))
+
+    def _reset_progress_text(self) -> None:
+        self.root.after(0, lambda: self.progress_var.set("진행률: 대기 중"))
+        self.root.after(0, lambda: self.scan_counter_var.set("처리 0 | skip 0 | 오류 0"))
+
+    def _set_scan_summary(self, processed: int = 0, skipped: int = 0, errors: int = 0) -> None:
+        self.root.after(
+            0,
+            lambda: self.scan_counter_var.set(
+                f"처리 {processed} | skip {skipped} | 오류 {errors}"
+            ),
+        )
+
     def _build_ui(self) -> None:
         outer = ttk.Frame(self.root, padding=10)
         outer.pack(fill="both", expand=True)
@@ -748,9 +772,9 @@ class OrganizerGUI:
         controls = ttk.Frame(top)
         controls.grid(row=2, column=0, columnspan=6, sticky="ew", pady=(10, 0))
 
-        for i in range(8):
+        for i in range(10):
             controls.columnconfigure(i, weight=0)
-        controls.columnconfigure(8, weight=1)
+        controls.columnconfigure(10, weight=1)
 
         self.run_once_btn = self._grid_button(
             controls,
@@ -804,6 +828,32 @@ class OrganizerGUI:
             pady=4,
         )
 
+        self.pause_btn = self._grid_button(
+            controls,
+            text="작업 정지",
+            command=self.pause_current_task,
+            style_name="Orange.TButton",
+            width=12,
+            row=0,
+            column=4,
+            sticky="w",
+            padx=4,
+            pady=4,
+        )
+
+        self.resume_btn = self._grid_button(
+            controls,
+            text="작업 재시작",
+            command=self.resume_current_task,
+            style_name="Green.TButton",
+            width=12,
+            row=0,
+            column=5,
+            sticky="w",
+            padx=4,
+            pady=4,
+        )
+
         self.reindex_btn = self._grid_button(
             controls,
             text="연도보정+재인덱싱",
@@ -811,7 +861,7 @@ class OrganizerGUI:
             style_name="Blue.TButton",
             width=18,
             row=0,
-            column=4,
+            column=6,
             sticky="w",
             padx=4,
             pady=4,
@@ -824,7 +874,7 @@ class OrganizerGUI:
             style_name="Green.TButton",
             width=16,
             row=0,
-            column=5,
+            column=7,
             sticky="w",
             padx=4,
             pady=4,
@@ -837,7 +887,7 @@ class OrganizerGUI:
             style_name="Orange.TButton",
             width=12,
             row=0,
-            column=6,
+            column=8,
             sticky="w",
             padx=4,
             pady=4,
@@ -850,7 +900,7 @@ class OrganizerGUI:
             style_name="Soft.TButton",
             width=12,
             row=0,
-            column=7,
+            column=9,
             sticky="w",
             padx=4,
             pady=4,
@@ -876,10 +926,36 @@ class OrganizerGUI:
         ).grid(
             row=1,
             column=0,
-            columnspan=9,
+            columnspan=10,
             sticky="ew",
             padx=4,
             pady=(8, 2),
+        )
+
+        ttk.Label(
+            controls,
+            textvariable=self.progress_var,
+            anchor="w",
+        ).grid(
+            row=2,
+            column=0,
+            columnspan=10,
+            sticky="ew",
+            padx=4,
+            pady=(2, 2),
+        )
+
+        ttk.Label(
+            controls,
+            textvariable=self.scan_counter_var,
+            anchor="w",
+        ).grid(
+            row=3,
+            column=0,
+            columnspan=10,
+            sticky="ew",
+            padx=4,
+            pady=(2, 2),
         )
 
         options_frame = ttk.Frame(top)
@@ -1047,6 +1123,12 @@ class OrganizerGUI:
         action_row = ttk.Frame(parent)
         action_row.pack(fill="x", pady=(8, 8))
 
+        action_row_top = ttk.Frame(action_row)
+        action_row_top.pack(fill="x", anchor="w")
+
+        action_row_bottom = ttk.Frame(action_row)
+        action_row_bottom.pack(fill="x", anchor="w", pady=(6, 0))
+
         dashboard = ttk.LabelFrame(parent, text="검색 요약", padding=10)
         dashboard.pack(fill="x", pady=(0, 8))
 
@@ -1065,7 +1147,7 @@ class OrganizerGUI:
 
 
         self._pack_button(
-            action_row,
+            action_row_top,
             text="검색",
             command=self.search,
             style_name="Blue.TButton",
@@ -1073,7 +1155,7 @@ class OrganizerGUI:
             side="left",
         )
         self._pack_button(
-            action_row,
+            action_row_top,
             text="필터 초기화",
             command=self.clear_filters,
             style_name="Soft.TButton",
@@ -1082,7 +1164,7 @@ class OrganizerGUI:
             padx=6,
         )
         self._pack_button(
-            action_row,
+            action_row_top,
             text="정리본 파일 열기",
             command=self.open_selected_file,
             style_name="Soft.TButton",
@@ -1091,7 +1173,7 @@ class OrganizerGUI:
             padx=(24, 6),
         )
         self._pack_button(
-            action_row,
+            action_row_top,
             text="정리본 폴더 열기",
             command=self.open_selected_folder,
             style_name="Soft.TButton",
@@ -1100,7 +1182,7 @@ class OrganizerGUI:
             padx=6,
         )
         self._pack_button(
-            action_row,
+            action_row_top,
             text="원본 파일 열기",
             command=self.open_selected_original_file,
             style_name="Soft.TButton",
@@ -1109,7 +1191,7 @@ class OrganizerGUI:
             padx=(24, 6),
         )
         self._pack_button(
-            action_row,
+            action_row_top,
             text="원본 폴더 열기",
             command=self.open_selected_original_folder,
             style_name="Soft.TButton",
@@ -1118,7 +1200,7 @@ class OrganizerGUI:
             padx=6,
         )
         self._pack_button(
-            action_row,
+            action_row_top,
             text="DOI 열기",
             command=self.open_selected_doi,
             style_name="Soft.TButton",
@@ -1127,7 +1209,7 @@ class OrganizerGUI:
             padx=6,
         )
         self._pack_button(
-            action_row,
+            action_row_bottom,
             text="선택 파일 모으기",
             command=self.collect_selected_files,
             style_name="Green.TButton",
@@ -1136,7 +1218,7 @@ class OrganizerGUI:
             padx=(24, 6),
         )
         self._pack_button(
-            action_row,
+            action_row_bottom,
             text="선택 파일 ZIP",
             command=self.export_selected_zip,
             style_name="Orange.TButton",
@@ -1145,7 +1227,7 @@ class OrganizerGUI:
             padx=6,
         )
         self._pack_button(
-            action_row,
+            action_row_bottom,
             text="선택 목록 CSV 저장",
             command=self.export_selected_csv,
             style_name="Soft.TButton",
@@ -1154,7 +1236,7 @@ class OrganizerGUI:
             padx=6,
         )
         self._pack_button(
-            action_row,
+            action_row_bottom,
             text="검색 결과 전체 CSV 저장",
             command=self.export_all_results_csv,
             style_name="Soft.TButton",
@@ -1205,19 +1287,48 @@ class OrganizerGUI:
             )
             self.tree.column(col, width=widths[col], anchor="w")
 
+        tree_v_scrollbar = ttk.Scrollbar(
+            tree_frame,
+            orient="vertical",
+            command=self.tree.yview,
+        )
+        tree_h_scrollbar = ttk.Scrollbar(
+            tree_frame,
+            orient="horizontal",
+            command=self.tree.xview,
+        )
+        self.tree.configure(
+            yscrollcommand=tree_v_scrollbar.set,
+            xscrollcommand=tree_h_scrollbar.set,
+        )
+
+        tree_v_scrollbar.pack(side="right", fill="y")
+        tree_h_scrollbar.pack(side="bottom", fill="x")
         self.tree.pack(side="left", fill="both", expand=True)
         self.tree.bind("<Double-1>", self._on_tree_double_click)
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
 
-        scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
-        scrollbar.pack(side="right", fill="y")
-        self.tree.configure(yscrollcommand=scrollbar.set)
-
         snippet_box = ttk.LabelFrame(parent, text="미리보기", padding=8)
         snippet_box.pack(fill="both", expand=False, pady=(8, 0))
 
-        self.snippet_text = tk.Text(snippet_box, height=8, wrap="word", state="disabled")
-        self.snippet_text.pack(fill="both", expand=True)
+        snippet_frame = ttk.Frame(snippet_box)
+        snippet_frame.pack(fill="both", expand=True)
+
+        self.snippet_text = tk.Text(
+            snippet_frame,
+            height=8,
+            wrap="word",
+            state="disabled",
+        )
+        snippet_scrollbar = ttk.Scrollbar(
+            snippet_frame,
+            orient="vertical",
+            command=self.snippet_text.yview,
+        )
+        self.snippet_text.configure(yscrollcommand=snippet_scrollbar.set)
+
+        snippet_scrollbar.pack(side="right", fill="y")
+        self.snippet_text.pack(side="left", fill="both", expand=True)
 
     def _reset_search_dashboard(self) -> None:
         self.result_count_var.set("검색 결과: 0건")
@@ -1246,8 +1357,28 @@ class OrganizerGUI:
         self.unknown_count_var.set(f"미분류: {unknown}건")
 
     def _build_log_tab(self, parent: ttk.Frame) -> None:
-        self.log_text = tk.Text(parent, wrap="word", state="disabled")
-        self.log_text.pack(fill="both", expand=True)
+        frame = ttk.Frame(parent)
+        frame.pack(fill="both", expand=True)
+
+        self.log_text = tk.Text(frame, wrap="none", state="disabled")
+        log_v_scrollbar = ttk.Scrollbar(
+            frame,
+            orient="vertical",
+            command=self.log_text.yview,
+        )
+        log_h_scrollbar = ttk.Scrollbar(
+            frame,
+            orient="horizontal",
+            command=self.log_text.xview,
+        )
+        self.log_text.configure(
+            yscrollcommand=log_v_scrollbar.set,
+            xscrollcommand=log_h_scrollbar.set,
+        )
+
+        log_v_scrollbar.pack(side="right", fill="y")
+        log_h_scrollbar.pack(side="bottom", fill="x")
+        self.log_text.pack(side="left", fill="both", expand=True)
 
     def _set_text_widget(self, widget: tk.Text, content: str) -> None:
         widget.configure(state="normal")
@@ -1383,15 +1514,30 @@ class OrganizerGUI:
             output_dir=output_dir,
             log_fn=self.append_log,
             cancel_event=self.cancel_event,
+            pause_event=self.pause_event,
             crossref_mailto=self.crossref_email_var.get().strip()
             or "your-email@example.com",
             crossref_cache_days=self._get_crossref_cache_days(),
         )
 
+
+    def pause_current_task(self) -> None:
+        self.pause_event.set()
+        self.append_log("[PAUSE] 일시정지 요청됨")
+        self.set_status("일시정지됨")
+        self._update_button_states()
+
+    def resume_current_task(self) -> None:
+        self.pause_event.clear()
+        self.append_log("[RESUME] 작업 재시작")
+        self.set_status("작업 재시작")
+        self._update_button_states()
+
     def _update_button_states(self) -> None:
         watching = self.observer is not None and self.observer.is_alive()
         worker_running = self.worker_thread is not None and self.worker_thread.is_alive()
         busy = watching or worker_running
+        paused = self.pause_event.is_set()
 
         self.start_watch_btn.configure(state="disabled" if busy else "normal")
         self.stop_watch_btn.configure(state="normal" if watching else "disabled")
@@ -1399,6 +1545,8 @@ class OrganizerGUI:
         self.reindex_btn.configure(state="disabled" if worker_running else "normal")
         self.reparse_btn.configure(state="disabled" if worker_running else "normal")
         self.cancel_btn.configure(state="normal" if busy else "disabled")
+        self.pause_btn.configure(state="normal" if busy and not paused else "disabled")
+        self.resume_btn.configure(state="normal" if busy and paused else "disabled")
 
     def _run_in_thread(self, target: Callable[[], None], status_text: str) -> None:
         if self.worker_thread and self.worker_thread.is_alive():
@@ -1406,6 +1554,7 @@ class OrganizerGUI:
             return
 
         self.cancel_event.clear()
+        self.pause_event.clear()
         self.status_var.set(status_text)
         self.worker_thread = threading.Thread(target=target, daemon=True)
         self.worker_thread.start()
@@ -1603,6 +1752,8 @@ class OrganizerGUI:
             organizer = self._create_organizer(watch_dir, output_dir)
             try:
                 self.append_log(f"[SCAN] 1회 처리 시작: {watch_dir}")
+                self._set_progress_text("스캔 준비 중")
+                self._set_scan_summary(0, 0, 0)
 
                 if not self.recursive_var.get() or self.watch_mode_var.get() == "all":
                     scan_existing_pdfs(
@@ -1665,6 +1816,7 @@ class OrganizerGUI:
 
         try:
             self.cancel_event.clear()
+            self.pause_event.clear()
             self.organizer = self._create_organizer(watch_dir, output_dir)
 
             base_handler = PDFCreatedHandler(self.organizer)
@@ -1707,6 +1859,7 @@ class OrganizerGUI:
                 self.organizer.close()
                 self.organizer = None
 
+            self.pause_event.clear()
             self.status_var.set("감시 중지")
             self.append_log("[WATCH] 감시 중지")
         except Exception as exc:

@@ -1,0 +1,16 @@
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install pypdf watchdog requests
+
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install pypdf watchdog requests
+python -m academic_paper_organizer.gui
+
+
+cd D:\coding\academic_paper_organizer_windows_exe
+.venv\Scripts\Activate.ps1
+$env:PYTHONPATH="src"
+python -m academic_paper_organizer.gui

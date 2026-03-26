@@ -415,6 +415,7 @@ class PaperIndex:
         year: str | None = None,
         field_code: str | None = None,
         venue: str | None = None,
+        doc_type: str | None = None,
         limit: int = 50,
     ) -> list[PaperRow]:
         sql = """
@@ -458,6 +459,10 @@ class PaperIndex:
         if venue:
             sql += " AND venue LIKE ?"
             params.append(f"%{venue}%")
+
+        if doc_type:
+            sql += " AND COALESCE(doc_type, 'unknown') = ?"
+            params.append(doc_type)
 
         sql += " ORDER BY year DESC, title ASC LIMIT ?"
         params.append(limit)
@@ -1114,6 +1119,7 @@ class PaperOrganizer:
         output_dir: Path,
         log_fn: Callable[[str], None] | None = None,
         cancel_event: threading.Event | None = None,
+        pause_event: threading.Event | None = None,
         crossref_mailto: str = "your-email@example.com",
         crossref_cache_days: int = 180,
     ):
@@ -1121,6 +1127,7 @@ class PaperOrganizer:
         self.output_dir = Path(output_dir).resolve()
         self.log_fn = log_fn or (lambda msg: None)
         self.cancel_event = cancel_event or threading.Event()
+        self.pause_event = pause_event or threading.Event()
 
         self.crossref_mailto = crossref_mailto
         self.crossref_cache_days = crossref_cache_days
@@ -1141,6 +1148,14 @@ class PaperOrganizer:
 
     def is_cancelled(self) -> bool:
         return self.cancel_event.is_set()
+
+    def wait_if_paused(self) -> bool:
+        while self.pause_event.is_set():
+            if self.cancel_event.is_set():
+                return False
+            time.sleep(0.2)
+        return True
+
 
     def fetch_crossref_record(self, doi: str) -> dict[str, object]:
         norm_doi = normalize_doi(doi)
@@ -1337,6 +1352,10 @@ class PaperOrganizer:
             self.log("[CANCEL] PDF 처리 취소됨")
             return
 
+        if not self.wait_if_paused():
+            self.log("[CANCEL] 일시정지 중 취소됨")
+            return
+
         pdf_path = Path(pdf_path).resolve()
 
         if not pdf_path.exists() or not pdf_path.is_file():
@@ -1357,6 +1376,9 @@ class PaperOrganizer:
             if self.is_cancelled():
                 self.log(f"[CANCEL] 메타 추출 전 취소: {pdf_path}")
                 return
+            if not self.wait_if_paused():
+                self.log(f"[CANCEL] 일시정지 중 취소됨: {pdf_path}")
+                return
 
             meta = self.extract_paper_metadata(pdf_path)
 
@@ -1375,6 +1397,10 @@ class PaperOrganizer:
             doc_type = meta.get("doc_type", "unknown").strip() or "unknown"
             doc_score = meta.get("doc_score", "").strip()
             doc_reasons_json = meta.get("doc_reasons_json", "[]").strip() or "[]"
+
+            if not self.wait_if_paused():
+                self.log(f"[CANCEL] 일시정지 중 취소됨: {pdf_path}")
+                return
 
             dst_pdf = build_output_pdf_path(
                 self.output_dir,
@@ -1478,11 +1504,15 @@ def scan_existing_pdfs(
 ) -> None:
     root_dir = Path(root_dir).resolve()
     logger = log_fn or (lambda msg: None)
+    progress = progress_fn or (lambda msg: None)
 
     count = 0
     for pdf_path in root_dir.rglob("*.pdf"):
         if organizer.is_cancelled():
             logger("[CANCEL] 기존 PDF 스캔 취소됨")
+            break
+        if not organizer.wait_if_paused():
+            logger("[CANCEL] 일시정지 중 스캔 취소됨")
             break
 
         if not pdf_path.is_file():
@@ -1540,7 +1570,14 @@ def repair_misplaced_year_folders(
         if repaired_year == current_year:
             continue
 
-        target_pdf = build_output_pdf_path(output_dir, current_field, repaired_year, pdf_path)
+        current_doc_type = str(meta.get("doc_type", "unknown")).strip() or "unknown"
+        target_pdf = build_output_pdf_path(
+            output_dir,
+            current_doc_type,
+            current_field,
+            repaired_year,
+            pdf_path,
+        )
         target_pdf.parent.mkdir(parents=True, exist_ok=True)
         target_pdf = unique_path(target_pdf)
 
