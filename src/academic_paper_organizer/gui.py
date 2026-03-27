@@ -32,6 +32,12 @@ from .core import (
     search_pubmed_by_title,
     export_professor_achievements_csv,
     export_latest_yonsei_professors_csv,
+    ProfessorSourceRow,
+    load_professor_source_registry,
+    save_professor_source_registry,
+    create_professor_source_registry_template,
+    fetch_professors_from_registered_sources,
+    export_professor_results_csv,
 )
 try:
     from .core import scan_existing_pdfs_fast
@@ -207,6 +213,10 @@ class OrganizerGUI:
         self.prof_group_var = tk.StringVar(value="전체")
         self.prof_count_var = tk.StringVar(value="교수 수: 0명")
         self.prof_paper_count_var = tk.StringVar(value="논문 수: 0건")
+
+        self.registry_csv_path = ""
+        self.registry_rows: list[dict[str, str]] = []
+        self.collected_registry_professor_rows = []
 
         self.recursive_var = tk.BooleanVar(value=self.app_config.recursive)
         self.watch_mode_var = tk.StringVar(
@@ -1461,6 +1471,24 @@ class OrganizerGUI:
             side="left",
             padx=6,
         )
+        self._pack_button(
+            top_row,
+            text="교수정보 URL 등록/편집",
+            command=self.open_professor_registry_editor,
+            style_name="Soft.TButton",
+            width=20,
+            side="left",
+            padx=6,
+        )
+        self._pack_button(
+            top_row,
+            text="등록 URL로 교수정보 수집",
+            command=self.collect_professors_from_registry,
+            style_name="Blue.TButton",
+            width=22,
+            side="left",
+            padx=6,
+        )
 
         ttk.Label(top_row, text="생성 구분").pack(side="left", padx=(10, 6))
         self.prof_group_combo = ttk.Combobox(
@@ -2082,6 +2110,467 @@ class OrganizerGUI:
         tree.bind("<space>", toggle_selected)
 
         populate(rows)
+
+
+    def _load_registry_rows(self, csv_path: str) -> list[dict[str, str]]:
+        rows = []
+        for row in load_professor_source_registry(csv_path):
+            rows.append({
+                "id": row.id,
+                "group": row.group,
+                "department_ko": row.department_ko,
+                "department_en": row.department_en,
+                "page_type": row.page_type,
+                "url_ko": row.url_ko,
+                "url_en": row.url_en,
+                "active": row.active,
+                "note": row.note,
+            })
+        return rows
+
+    def open_professor_registry_editor(self, file_path: str | None = None) -> None:
+        target_path = file_path or self.registry_csv_path
+        if not target_path:
+            target_path = filedialog.askopenfilename(
+                title="교수정보 URL 등록 CSV 열기",
+                filetypes=[("CSV 파일", "*.csv"), ("모든 파일", "*.*")],
+            )
+        if not target_path:
+            return
+
+        try:
+            rows = self._load_registry_rows(target_path)
+        except Exception as exc:
+            self.append_log(f"[REGISTRY-ERROR] 등록 CSV 열기 실패: {target_path} | {exc}")
+            messagebox.showerror("오류", f"등록 CSV를 열 수 없습니다.\n{exc}")
+            return
+
+        self.registry_csv_path = str(target_path)
+        self.registry_rows = list(rows)
+
+        editor = tk.Toplevel(self.root)
+        editor.title("교수정보 URL 등록 / 편집")
+        editor.geometry("1520x820")
+        editor.minsize(1100, 680)
+
+        current_path = {"value": str(target_path)}
+        selected_item = {"value": None}
+
+        info_var = tk.StringVar(value=f"파일: {current_path['value']}")
+        count_var = tk.StringVar(value=f"행 수: {len(rows)}")
+
+        top = ttk.Frame(editor, padding=10)
+        top.pack(fill="x")
+        ttk.Label(top, textvariable=info_var).pack(side="left", padx=(0, 12))
+        ttk.Label(top, textvariable=count_var).pack(side="left")
+
+        form = ttk.LabelFrame(editor, text="등록 항목 입력", padding=10)
+        form.pack(fill="x", padx=10, pady=(0, 8))
+        for col in (1,3):
+            form.columnconfigure(col, weight=1)
+
+        id_var = tk.StringVar()
+        group_var = tk.StringVar(value="기초의학")
+        dept_ko_var = tk.StringVar()
+        dept_en_var = tk.StringVar()
+        page_type_var = tk.StringVar(value="department_list")
+        url_ko_var = tk.StringVar()
+        url_en_var = tk.StringVar()
+        active_var = tk.StringVar(value="Y")
+        note_var = tk.StringVar()
+
+        ttk.Label(form, text="ID").grid(row=0, column=0, sticky="w", padx=(0,6), pady=4)
+        ttk.Entry(form, textvariable=id_var, width=10).grid(row=0, column=1, sticky="ew", pady=4)
+        ttk.Label(form, text="구분").grid(row=0, column=2, sticky="w", padx=(16,6), pady=4)
+        ttk.Combobox(form, textvariable=group_var, values=["기초의학","임상의학","인문의학"], state="readonly").grid(row=0, column=3, sticky="ew", pady=4)
+        ttk.Label(form, text="국문 교실명").grid(row=1, column=0, sticky="w", padx=(0,6), pady=4)
+        ttk.Entry(form, textvariable=dept_ko_var).grid(row=1, column=1, sticky="ew", pady=4)
+        ttk.Label(form, text="영문 교실명").grid(row=1, column=2, sticky="w", padx=(16,6), pady=4)
+        ttk.Entry(form, textvariable=dept_en_var).grid(row=1, column=3, sticky="ew", pady=4)
+        ttk.Label(form, text="페이지 유형").grid(row=2, column=0, sticky="w", padx=(0,6), pady=4)
+        ttk.Combobox(form, textvariable=page_type_var, values=["department_list","professor_profile"], state="readonly").grid(row=2, column=1, sticky="ew", pady=4)
+        ttk.Label(form, text="활성").grid(row=2, column=2, sticky="w", padx=(16,6), pady=4)
+        ttk.Combobox(form, textvariable=active_var, values=["Y","N"], state="readonly", width=8).grid(row=2, column=3, sticky="w", pady=4)
+        ttk.Label(form, text="국문 URL").grid(row=3, column=0, sticky="w", padx=(0,6), pady=4)
+        ttk.Entry(form, textvariable=url_ko_var).grid(row=3, column=1, columnspan=3, sticky="ew", pady=4)
+        ttk.Label(form, text="영문 URL").grid(row=4, column=0, sticky="w", padx=(0,6), pady=4)
+        ttk.Entry(form, textvariable=url_en_var).grid(row=4, column=1, columnspan=3, sticky="ew", pady=4)
+        ttk.Label(form, text="비고").grid(row=5, column=0, sticky="w", padx=(0,6), pady=4)
+        ttk.Entry(form, textvariable=note_var).grid(row=5, column=1, columnspan=3, sticky="ew", pady=4)
+
+        btns = ttk.Frame(editor, padding=(10,0,10,8))
+        btns.pack(fill="x")
+
+        tree_frame = ttk.Frame(editor, padding=(10,0,10,10))
+        tree_frame.pack(fill="both", expand=True)
+
+        columns = ("id","group","department_ko","department_en","page_type","url_ko","url_en","active","note")
+        tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="browse")
+        headings = {
+            "id":"ID","group":"구분","department_ko":"국문 교실명","department_en":"영문 교실명",
+            "page_type":"페이지 유형","url_ko":"국문 URL","url_en":"영문 URL","active":"활성","note":"비고"
+        }
+        widths = {"id":60,"group":90,"department_ko":160,"department_en":220,"page_type":120,"url_ko":360,"url_en":360,"active":60,"note":180}
+        for col in columns:
+            tree.heading(col, text=headings[col])
+            tree.column(col, width=widths[col], anchor="w")
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        vsb.pack(side="right", fill="y")
+        hsb.pack(side="bottom", fill="x")
+        tree.pack(side="left", fill="both", expand=True)
+
+        def update_count():
+            count_var.set(f"행 수: {len(tree.get_children())}")
+
+        def get_rows_from_tree() -> list[dict[str, str]]:
+            out = []
+            for item_id in tree.get_children():
+                vals = tree.item(item_id, "values")
+                out.append({
+                    "id": vals[0] if len(vals)>0 else "",
+                    "group": vals[1] if len(vals)>1 else "",
+                    "department_ko": vals[2] if len(vals)>2 else "",
+                    "department_en": vals[3] if len(vals)>3 else "",
+                    "page_type": vals[4] if len(vals)>4 else "department_list",
+                    "url_ko": vals[5] if len(vals)>5 else "",
+                    "url_en": vals[6] if len(vals)>6 else "",
+                    "active": vals[7] if len(vals)>7 else "Y",
+                    "note": vals[8] if len(vals)>8 else "",
+                })
+            return out
+
+        def populate(data_rows: list[dict[str, str]]) -> None:
+            for item in tree.get_children():
+                tree.delete(item)
+            for row in data_rows:
+                tree.insert("", "end", values=(
+                    row.get("id",""), row.get("group",""), row.get("department_ko",""), row.get("department_en",""),
+                    row.get("page_type","department_list"), row.get("url_ko",""), row.get("url_en",""), row.get("active","Y"), row.get("note","")
+                ))
+            update_count()
+
+        def fill_form_from_selection(event=None):
+            sel = tree.selection()
+            if not sel:
+                selected_item["value"] = None
+                return
+            item_id = sel[0]
+            selected_item["value"] = item_id
+            vals = tree.item(item_id, "values")
+            id_var.set(vals[0] if len(vals)>0 else "")
+            group_var.set(vals[1] if len(vals)>1 else "기초의학")
+            dept_ko_var.set(vals[2] if len(vals)>2 else "")
+            dept_en_var.set(vals[3] if len(vals)>3 else "")
+            page_type_var.set(vals[4] if len(vals)>4 else "department_list")
+            url_ko_var.set(vals[5] if len(vals)>5 else "")
+            url_en_var.set(vals[6] if len(vals)>6 else "")
+            active_var.set(vals[7] if len(vals)>7 else "Y")
+            note_var.set(vals[8] if len(vals)>8 else "")
+
+        def clear_form():
+            selected_item["value"] = None
+            id_var.set("")
+            group_var.set("기초의학")
+            dept_ko_var.set("")
+            dept_en_var.set("")
+            page_type_var.set("department_list")
+            url_ko_var.set("")
+            url_en_var.set("")
+            active_var.set("Y")
+            note_var.set("")
+
+        def upsert_current():
+            row = {
+                "id": id_var.get().strip() or str(len(tree.get_children()) + 1),
+                "group": group_var.get().strip(),
+                "department_ko": dept_ko_var.get().strip(),
+                "department_en": dept_en_var.get().strip(),
+                "page_type": page_type_var.get().strip() or "department_list",
+                "url_ko": url_ko_var.get().strip(),
+                "url_en": url_en_var.get().strip(),
+                "active": active_var.get().strip() or "Y",
+                "note": note_var.get().strip(),
+            }
+            if not row["department_ko"] or not row["url_ko"]:
+                messagebox.showwarning("알림", "국문 교실명과 국문 URL은 필수입니다.", parent=editor)
+                return
+            if selected_item["value"] and selected_item["value"] in tree.get_children():
+                tree.item(selected_item["value"], values=(row["id"],row["group"],row["department_ko"],row["department_en"],row["page_type"],row["url_ko"],row["url_en"],row["active"],row["note"]))
+            else:
+                tree.insert("", "end", values=(row["id"],row["group"],row["department_ko"],row["department_en"],row["page_type"],row["url_ko"],row["url_en"],row["active"],row["note"]))
+            clear_form()
+            update_count()
+
+        def delete_selected():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showwarning("알림", "먼저 삭제할 행을 선택하세요.", parent=editor)
+                return
+            for item_id in sel:
+                tree.delete(item_id)
+            clear_form()
+            update_count()
+
+        def save_current_as(save_as: bool = False):
+            rows_data = get_rows_from_tree()
+            if not rows_data:
+                messagebox.showwarning("알림", "저장할 등록 항목이 없습니다.", parent=editor)
+                return
+            target = current_path["value"]
+            if save_as or not target:
+                target = filedialog.asksaveasfilename(
+                    title="교수정보 URL 등록 CSV 저장",
+                    defaultextension=".csv",
+                    initialfile="professor_source_registry.csv",
+                    filetypes=[("CSV", "*.csv")],
+                    parent=editor,
+                )
+                if not target:
+                    return
+            rows_obj = [ProfessorSourceRow(**row) for row in rows_data]
+            save_professor_source_registry(target, rows_obj)
+            current_path["value"] = str(target)
+            self.registry_csv_path = str(target)
+            self.registry_rows = rows_data
+            info_var.set(f"파일: {current_path['value']}")
+            self.append_log(f"[REGISTRY] 등록 CSV 저장 완료: {target} | {len(rows_data)}행")
+            self.set_status(f"등록 CSV 저장 완료: {len(rows_data)}행")
+
+        def load_other_csv():
+            next_path = filedialog.askopenfilename(
+                title="교수정보 URL 등록 CSV 열기",
+                filetypes=[("CSV 파일", "*.csv"), ("모든 파일", "*.*")],
+                parent=editor,
+            )
+            if not next_path:
+                return
+            try:
+                data_rows = self._load_registry_rows(next_path)
+            except Exception as exc:
+                messagebox.showerror("오류", f"등록 CSV를 열 수 없습니다.\n{exc}", parent=editor)
+                return
+            current_path["value"] = str(next_path)
+            self.registry_csv_path = str(next_path)
+            self.registry_rows = list(data_rows)
+            info_var.set(f"파일: {current_path['value']}")
+            populate(data_rows)
+            self.append_log(f"[REGISTRY] 등록 CSV 로드: {next_path} | {len(data_rows)}행")
+
+        def create_template_file():
+            target = filedialog.asksaveasfilename(
+                title="교수정보 URL 등록 템플릿 저장",
+                defaultextension=".csv",
+                initialfile="professor_source_registry_template.csv",
+                filetypes=[("CSV", "*.csv")],
+                parent=editor,
+            )
+            if not target:
+                return
+            create_professor_source_registry_template(target)
+            current_path["value"] = str(target)
+            load_other_csv.__defaults__ = ()
+            try:
+                data_rows = self._load_registry_rows(target)
+                populate(data_rows)
+                self.registry_csv_path = str(target)
+                self.registry_rows = list(data_rows)
+                info_var.set(f"파일: {current_path['value']}")
+            except Exception:
+                pass
+            self.append_log(f"[REGISTRY] 템플릿 생성: {target}")
+
+        tree.bind("<<TreeviewSelect>>", fill_form_from_selection)
+
+        self._pack_button(btns, text="템플릿 생성", command=create_template_file, style_name="Soft.TButton", width=12, side="left", padx=4, pady=4)
+        self._pack_button(btns, text="다른 CSV 열기", command=load_other_csv, style_name="Soft.TButton", width=12, side="left", padx=4, pady=4)
+        self._pack_button(btns, text="현재 입력 추가/수정", command=upsert_current, style_name="Green.TButton", width=16, side="left", padx=4, pady=4)
+        self._pack_button(btns, text="선택 삭제", command=delete_selected, style_name="Red.TButton", width=12, side="left", padx=4, pady=4)
+        self._pack_button(btns, text="CSV 저장", command=lambda: save_current_as(False), style_name="Blue.TButton", width=12, side="left", padx=4, pady=4)
+        self._pack_button(btns, text="다른 이름 저장", command=lambda: save_current_as(True), style_name="Soft.TButton", width=14, side="left", padx=4, pady=4)
+
+        populate(rows)
+
+    def _open_registry_results_editor(self, rows, *, source_label: str = "등록 URL 수집 결과") -> None:
+        editor = tk.Toplevel(self.root)
+        editor.title("등록 URL 수집 결과 검토 / 저장")
+        editor.geometry("1440x800")
+        editor.minsize(1100, 640)
+
+        checked: set[str] = set()
+        row_meta: dict[str, dict[str, str]] = {}
+        current_path = {"value": ""}
+
+        top = ttk.Frame(editor, padding=10)
+        top.pack(fill="x")
+        info_var = tk.StringVar(value=source_label)
+        count_var = tk.StringVar(value="")
+        ttk.Label(top, textvariable=info_var).pack(side="left", padx=(0, 12))
+        ttk.Label(top, textvariable=count_var).pack(side="left")
+
+        btns = ttk.Frame(editor, padding=(10,0,10,8))
+        btns.pack(fill="x")
+        tree_frame = ttk.Frame(editor, padding=(10,0,10,10))
+        tree_frame.pack(fill="both", expand=True)
+
+        columns = ("group","department","name","query","title","email","match_status","review_status","source_url","source_url_en")
+        tree = ttk.Treeview(tree_frame, columns=columns, show="tree headings", selectmode="extended")
+        tree.heading("#0", text="선택")
+        tree.column("#0", width=64, minwidth=56, anchor="center", stretch=False)
+        headings = {"group":"구분","department":"교실","name":"교수명","query":"영문이름(Query)","title":"직위","email":"이메일","match_status":"매칭상태","review_status":"검토상태","source_url":"국문 URL","source_url_en":"영문 URL"}
+        widths = {"group":90,"department":150,"name":100,"query":180,"title":100,"email":180,"match_status":90,"review_status":90,"source_url":300,"source_url_en":300}
+        for col in columns:
+            tree.heading(col, text=headings[col])
+            tree.column(col, width=widths[col], anchor="w")
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        vsb.pack(side="right", fill="y")
+        hsb.pack(side="bottom", fill="x")
+        tree.pack(side="left", fill="both", expand=True)
+
+        def set_checked(item_id: str, state: bool) -> None:
+            if state:
+                checked.add(item_id)
+                tree.item(item_id, text="☑")
+            else:
+                checked.discard(item_id)
+                tree.item(item_id, text="☐")
+
+        def checked_ids() -> list[str]:
+            valid = set(tree.get_children())
+            for item_id in list(checked):
+                if item_id not in valid:
+                    checked.discard(item_id)
+            return [item_id for item_id in tree.get_children() if item_id in checked]
+
+        def refresh_count():
+            count_var.set(f"행 수: {len(tree.get_children())} | 선택: {len(checked_ids())}")
+
+        def toggle_selected(event=None):
+            selected = list(tree.selection())
+            if not selected:
+                return "break"
+            should_check = any(item_id not in checked for item_id in selected)
+            for item_id in selected:
+                set_checked(item_id, should_check)
+            refresh_count()
+            return "break"
+
+        def on_click(event):
+            region = tree.identify("region", event.x, event.y)
+            column = tree.identify_column(event.x)
+            item_id = tree.identify_row(event.y)
+            if region == "tree" and column == "#0" and item_id:
+                set_checked(item_id, item_id not in checked)
+                refresh_count()
+                return "break"
+            return None
+
+        def populate(data_rows):
+            for item in tree.get_children():
+                tree.delete(item)
+            checked.clear()
+            row_meta.clear()
+            for row in data_rows:
+                if hasattr(row, '__dict__'):
+                    row = dict(row.__dict__)
+                item_id = tree.insert("", "end", text="☐", values=(row.get("group",""), row.get("department",""), row.get("name",""), row.get("query",""), row.get("title",""), row.get("email",""), row.get("match_status",""), row.get("review_status","pending"), row.get("source_url",""), row.get("source_url_en","")))
+                row_meta[item_id] = dict(row)
+            refresh_count()
+
+        def delete_checked():
+            ids = checked_ids()
+            if not ids:
+                messagebox.showwarning("알림", "먼저 삭제할 행을 선택하세요.", parent=editor)
+                return
+            for item_id in ids:
+                if item_id in tree.get_children():
+                    tree.delete(item_id)
+                checked.discard(item_id)
+                row_meta.pop(item_id, None)
+            refresh_count()
+
+        def save_rows(only_checked: bool = False):
+            item_ids = checked_ids() if only_checked else list(tree.get_children())
+            if not item_ids:
+                messagebox.showwarning("알림", "저장할 행이 없습니다.", parent=editor)
+                return
+            save_path = filedialog.asksaveasfilename(
+                title="교수정보 CSV 저장",
+                defaultextension=".csv",
+                initialfile="professor_results.csv" if not only_checked else "professor_results_selected.csv",
+                filetypes=[("CSV", "*.csv")],
+                parent=editor,
+            )
+            if not save_path:
+                return
+            export_rows = []
+            for item_id in item_ids:
+                vals = tree.item(item_id, "values")
+                export_rows.append({
+                    "group": vals[0] if len(vals)>0 else "",
+                    "department": vals[1] if len(vals)>1 else "",
+                    "name": vals[2] if len(vals)>2 else "",
+                    "query": vals[3] if len(vals)>3 else "",
+                    "title": vals[4] if len(vals)>4 else "",
+                    "email": vals[5] if len(vals)>5 else "",
+                    "match_status": vals[6] if len(vals)>6 else "",
+                    "review_status": vals[7] if len(vals)>7 else "pending",
+                    "source_url": vals[8] if len(vals)>8 else "",
+                    "source_url_en": vals[9] if len(vals)>9 else "",
+                    "affiliation": row_meta.get(item_id, {}).get("affiliation", "Yonsei University College of Medicine"),
+                })
+            rows_obj = []
+            from .core import ProfessorResultRow
+            for row in export_rows:
+                rows_obj.append(ProfessorResultRow(**row))
+            export_professor_results_csv(save_path, rows_obj)
+            current_path["value"] = save_path
+            self.append_log(f"[REGISTRY] 수집 결과 저장 완료: {save_path} | {len(rows_obj)}명")
+            self.set_status(f"등록 수집 결과 저장 완료: {len(rows_obj)}명")
+            messagebox.showinfo("완료", f"교수정보 CSV 저장이 완료되었습니다.\n\n{save_path}", parent=editor)
+
+        tree.bind("<Button-1>", on_click, add="+")
+        tree.bind("<space>", toggle_selected)
+        self._pack_button(btns, text="선택 토글", command=toggle_selected, style_name="Soft.TButton", width=12, side="left", padx=4, pady=4)
+        self._pack_button(btns, text="선택 삭제", command=delete_checked, style_name="Red.TButton", width=12, side="left", padx=4, pady=4)
+        self._pack_button(btns, text="현재 목록 저장", command=lambda: save_rows(False), style_name="Green.TButton", width=14, side="left", padx=4, pady=4)
+        self._pack_button(btns, text="선택만 저장", command=lambda: save_rows(True), style_name="Blue.TButton", width=14, side="left", padx=4, pady=4)
+
+        populate(rows)
+
+    def collect_professors_from_registry(self) -> None:
+        registry_csv = self.registry_csv_path
+        if not registry_csv:
+            registry_csv = filedialog.askopenfilename(
+                title="교수정보 URL 등록 CSV 선택",
+                filetypes=[("CSV 파일", "*.csv"), ("모든 파일", "*.*")],
+            )
+        if not registry_csv:
+            return
+        self.registry_csv_path = str(registry_csv)
+        group_filter = (self.prof_group_var.get() or "전체").strip() or "전체"
+        self.set_status(f"등록 URL 기반 교수정보 수집 중... ({group_filter})")
+        self.append_log(f"[REGISTRY] 등록 URL 수집 시작 | 구분={group_filter} | 파일={registry_csv}")
+
+        def worker() -> None:
+            try:
+                rows = fetch_professors_from_registered_sources(
+                    registry_csv,
+                    group_filter=group_filter,
+                    logger=self.append_log,
+                )
+                self.collected_registry_professor_rows = rows
+                self.root.after(0, lambda: self.set_status(f"등록 URL 수집 완료: {len(rows)}명"))
+                self.root.after(0, lambda: self._open_registry_results_editor(rows, source_label=f"등록 URL 수집 결과 | {group_filter} | {Path(registry_csv).name}"))
+            except Exception as exc:
+                self.append_log(f"[REGISTRY-ERROR] {exc}")
+                self.root.after(0, lambda: messagebox.showerror("오류", f"등록 URL 기반 수집 중 오류가 발생했습니다:\n{exc}"))
+                self.root.after(0, lambda: self.set_status("등록 URL 수집 실패"))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _build_log_tab(self, parent: ttk.Frame) -> None:
         frame = ttk.Frame(parent)

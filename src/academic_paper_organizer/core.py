@@ -8,7 +8,7 @@ import sqlite3
 import threading
 import time
 from difflib import SequenceMatcher
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -4171,3 +4171,325 @@ def _fetch_english_professor_names_for_department(page, ko_department_url: str, 
     except Exception as exc:
         log(f"[YONSEI-EN-WARN] 영문 페이지 수집 실패: {en_url} | {exc}")
         return []
+
+
+# ==============================
+# Professor registry-based collection
+# ==============================
+
+@dataclass
+class ProfessorSourceRow:
+    id: str
+    group: str
+    department_ko: str
+    department_en: str
+    page_type: str
+    url_ko: str
+    url_en: str
+    active: str
+    note: str = ""
+
+
+@dataclass
+class ProfessorResultRow:
+    group: str
+    department: str
+    name: str
+    query: str
+    title: str
+    email: str
+    affiliation: str
+    source_url: str
+    source_url_en: str
+    match_status: str
+    review_status: str = "pending"
+
+
+REGISTRY_TEMPLATE_ROWS: list[ProfessorSourceRow] = [
+    ProfessorSourceRow(
+        id="1",
+        group="기초의학",
+        department_ko="생화학분자생물학교실",
+        department_en="Department of Biochemistry and Molecular Biology",
+        page_type="department_list",
+        url_ko="https://medicine.yonsei.ac.kr/medicine/research/basic/biochemistry-molecular-biology.do",
+        url_en="https://medicine.yonsei.ac.kr/medicine-en/education/basic/biochemistry-molecular-biology.do",
+        active="Y",
+        note="",
+    ),
+    ProfessorSourceRow(
+        id="2",
+        group="기초의학",
+        department_ko="해부학교실",
+        department_en="Department of Anatomy",
+        page_type="department_list",
+        url_ko="https://medicine.yonsei.ac.kr/medicine/research/basic/anatomy.do",
+        url_en="https://medicine.yonsei.ac.kr/medicine-en/education/basic/anatomy.do",
+        active="Y",
+        note="",
+    ),
+    ProfessorSourceRow(
+        id="3",
+        group="임상의학",
+        department_ko="안과학교실",
+        department_en="Department of Ophthalmology",
+        page_type="department_list",
+        url_ko="https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/ophthalmology.do",
+        url_en="https://medicine.yonsei.ac.kr/medicine-en/education/clinical/ophthalmology.do",
+        active="Y",
+        note="",
+    ),
+]
+
+
+BAD_PROF_NAME_TOKENS = {
+    "교육", "분야", "이메일", "홈페이지", "화면인쇄", "연구", "블로그",
+    "교수실", "전화", "연락처", "소개", "학력", "경력", "논문", "특임",
+    "교원", "연세", "의과대학", "세브란스", "홈", "더보기", "링크",
+}
+
+
+def load_professor_source_registry(csv_path: str | Path) -> list[ProfessorSourceRow]:
+    path = Path(csv_path)
+    if not path.exists():
+        return []
+
+    rows: list[ProfessorSourceRow] = []
+    with path.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            rows.append(
+                ProfessorSourceRow(
+                    id=str(row.get("id", "")).strip(),
+                    group=str(row.get("group", "")).strip(),
+                    department_ko=str(row.get("department_ko", "")).strip(),
+                    department_en=str(row.get("department_en", "")).strip(),
+                    page_type=str(row.get("page_type", "department_list")).strip() or "department_list",
+                    url_ko=str(row.get("url_ko", "")).strip(),
+                    url_en=str(row.get("url_en", "")).strip(),
+                    active=str(row.get("active", "Y")).strip() or "Y",
+                    note=str(row.get("note", "")).strip(),
+                )
+            )
+    return rows
+
+
+def save_professor_source_registry(csv_path: str | Path, rows: list[ProfessorSourceRow]) -> None:
+    path = Path(csv_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "id", "group", "department_ko", "department_en", "page_type",
+                "url_ko", "url_en", "active", "note",
+            ],
+        )
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(asdict(row))
+
+
+def create_professor_source_registry_template(csv_path: str | Path) -> None:
+    save_professor_source_registry(csv_path, REGISTRY_TEMPLATE_ROWS)
+
+
+def registry_clean_professor_name(name: str) -> str:
+    value = str(name or "").strip()
+    value = re.sub(
+        r"(임상부교수|임상조교수|임상교수|부교수|조교수|교수|중계교수|중견교수)",
+        "",
+        value,
+    ).strip()
+    value = re.sub(r"\s*(연구|블로그|특임|교수실|이메일|홈페이지|학력|경력|논문)$", "", value).strip()
+    value = re.sub(r"\s+", "", value)
+    return value
+
+
+def registry_is_valid_professor_name(name: str) -> bool:
+    value = registry_clean_professor_name(name)
+    if not re.fullmatch(r"[가-힣]{2,4}", value):
+        return False
+    if value in BAD_PROF_NAME_TOKENS:
+        return False
+    return True
+
+
+def _extract_emails_from_html(html: str) -> list[str]:
+    seen: set[str] = set()
+    emails: list[str] = []
+    for email in re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", html or ""):
+        if email.lower() not in seen:
+            seen.add(email.lower())
+            emails.append(email)
+    return emails
+
+
+def _extract_titles_from_html(html: str) -> list[str]:
+    titles: list[str] = []
+    for title in ["교수", "부교수", "조교수", "임상교수", "임상부교수", "임상조교수", "중계교수", "중견교수"]:
+        if title in (html or ""):
+            titles.append(title)
+    return titles
+
+
+def _safe_page_goto(page, url: str, timeout_ms: int = 20000) -> None:
+    page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+    try:
+        page.wait_for_load_state("networkidle", timeout=min(4000, timeout_ms))
+    except Exception:
+        pass
+    page.wait_for_timeout(1000)
+
+
+def parse_department_list_page_from_urls(
+    source: ProfessorSourceRow,
+    *,
+    logger: Callable[[str], None] | None = None,
+    timeout_ms: int = 20000,
+) -> list[ProfessorResultRow]:
+    log = logger or (lambda _msg: None)
+    ko_names: list[str] = []
+    en_names: list[str] = []
+    ko_en_map: dict[str, str] = {}
+    titles: list[str] = []
+    emails: list[str] = []
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context()
+        page = context.new_page()
+        try:
+            if source.url_ko:
+                _safe_page_goto(page, source.url_ko, timeout_ms)
+                ko_html = page.content()
+                ko_names = _extract_names_from_rendered_html(ko_html)
+                titles = _extract_titles_from_html(ko_html)
+                emails = _extract_emails_from_html(ko_html)
+                ko_en_map = _extract_korean_english_name_pairs(ko_html)
+                log(f"[REGISTRY] 국문 파싱 | {source.department_ko} | 이름후보={len(ko_names)}")
+
+            if source.url_en:
+                try:
+                    _safe_page_goto(page, source.url_en, timeout_ms)
+                    professor_url = _find_professor_staff_url(page, source.url_en)
+                    if professor_url and professor_url != source.url_en:
+                        _safe_page_goto(page, professor_url, timeout_ms)
+                    en_html = page.content()
+                    en_names = _extract_english_names_from_rendered_html(en_html)
+                    log(f"[REGISTRY] 영문 파싱 | {source.department_ko} | 영문후보={len(en_names)}")
+                except Exception as exc:
+                    log(f"[REGISTRY-WARN] 영문 페이지 파싱 실패: {source.department_ko} | {exc}")
+        finally:
+            browser.close()
+
+    matched = _match_korean_to_english_names(ko_names, en_names) if ko_names and en_names else {}
+    for ko_name, en_name in ko_en_map.items():
+        normalized_en = _normalize_english_professor_name(en_name)
+        if normalized_en:
+            matched[ko_name] = normalized_en
+
+    rows: list[ProfessorResultRow] = []
+    default_title = titles[0] if titles else ""
+    default_email = emails[0] if emails else ""
+    for name in ko_names:
+        clean_name = registry_clean_professor_name(name)
+        if not registry_is_valid_professor_name(clean_name):
+            continue
+        query = _normalize_english_professor_name(matched.get(name, "") or matched.get(clean_name, ""))
+        rows.append(
+            ProfessorResultRow(
+                group=source.group,
+                department=source.department_ko,
+                name=clean_name,
+                query=query,
+                title=default_title,
+                email=default_email,
+                affiliation="Yonsei University College of Medicine",
+                source_url=source.url_ko,
+                source_url_en=source.url_en,
+                match_status="matched" if query else "missing_en",
+                review_status="pending",
+            )
+        )
+    return rows
+
+
+def parse_professor_profile_page_from_urls(
+    source: ProfessorSourceRow,
+    *,
+    logger: Callable[[str], None] | None = None,
+    timeout_ms: int = 20000,
+) -> list[ProfessorResultRow]:
+    rows = parse_department_list_page_from_urls(source, logger=logger, timeout_ms=timeout_ms)
+    if rows:
+        return rows[:1]
+    return []
+
+
+def dedupe_professor_result_rows(rows: list[ProfessorResultRow]) -> list[ProfessorResultRow]:
+    best: dict[tuple[str, str, str], ProfessorResultRow] = {}
+    for row in rows:
+        clean_name = registry_clean_professor_name(row.name)
+        if not registry_is_valid_professor_name(clean_name):
+            continue
+        row.name = clean_name
+        key = (row.group, row.department, clean_name)
+        current = best.get(key)
+        if current is None:
+            best[key] = row
+            continue
+        current_score = (1 if current.query else 0) + (1 if current.email else 0)
+        new_score = (1 if row.query else 0) + (1 if row.email else 0)
+        if new_score > current_score:
+            best[key] = row
+    return sorted(best.values(), key=lambda r: (r.group, r.department, r.name))
+
+
+def fetch_professors_from_registered_sources(
+    registry_csv: str | Path,
+    *,
+    group_filter: str = "전체",
+    logger: Callable[[str], None] | None = None,
+) -> list[ProfessorResultRow]:
+    log = logger or (lambda _msg: None)
+    registry = load_professor_source_registry(registry_csv)
+    active_rows = [
+        row for row in registry
+        if str(row.active).upper() == "Y" and (group_filter == "전체" or row.group == group_filter)
+    ]
+    if not active_rows:
+        raise RuntimeError("활성화된 교수정보 URL 등록 항목이 없습니다.")
+
+    collected: list[ProfessorResultRow] = []
+    for source in active_rows:
+        log(f"[REGISTRY] 수집 시작 | {source.group} | {source.department_ko} | {source.page_type}")
+        try:
+            if source.page_type == "professor_profile":
+                rows = parse_professor_profile_page_from_urls(source, logger=log)
+            else:
+                rows = parse_department_list_page_from_urls(source, logger=log)
+            log(f"[REGISTRY] 수집 완료 | {source.department_ko} | {len(rows)}명")
+            collected.extend(rows)
+        except Exception as exc:
+            log(f"[REGISTRY-ERROR] 수집 실패 | {source.department_ko} | {exc}")
+
+    deduped = dedupe_professor_result_rows(collected)
+    log(f"[REGISTRY] 최종 정제 완료 | {len(deduped)}명")
+    return deduped
+
+
+def export_professor_results_csv(output_csv: str | Path, rows: list[ProfessorResultRow]) -> None:
+    path = Path(output_csv)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "group", "department", "name", "query", "title", "email",
+                "affiliation", "source_url", "source_url_en", "match_status", "review_status",
+            ],
+        )
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(asdict(row))

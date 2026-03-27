@@ -1,0 +1,4 @@
+﻿id,group,department_ko,department_en,page_type,url_ko,url_en,active,note
+1,기초의학,생화학분자생물학교실,Department of Biochemistry and Molecular Biology,department_list,https://medicine.yonsei.ac.kr/medicine/research/basic/biochemistry-molecular-biology.do,https://medicine.yonsei.ac.kr/medicine-en/education/basic/biochemistry-molecular-biology.do,Y,
+2,기초의학,해부학교실,Department of Anatomy,department_list,https://medicine.yonsei.ac.kr/medicine/research/basic/anatomy.do,https://medicine.yonsei.ac.kr/medicine-en/education/basic/anatomy.do,Y,
+3,임상의학,안과학교실,Department of Ophthalmology,department_list,https://medicine.yonsei.ac.kr/medicine/about/professor/clinic/ophthalmology.do,https://medicine.yonsei.ac.kr/medicine-en/education/clinical/ophthalmology.do,Y,
