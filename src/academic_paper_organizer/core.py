@@ -14,6 +14,10 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import quote, quote_plus, urljoin, urlparse
 
+import io
+from PIL import Image, ImageOps, ImageFilter
+import pytesseract
+
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
@@ -1334,6 +1338,189 @@ def search_pubmed_by_title(
             "search_url": search_url,
             "error": str(exc),
         }
+
+
+def extract_english_name_from_html(html: str) -> str:
+    if not html:
+        return ""
+    soup = BeautifulSoup(html, "html.parser")
+
+    for sel in [
+        ".name-en", ".eng-name", ".en-name",
+        "[class*='eng']", "[class*='english']",
+        "h1", "h2", "h3", "strong"
+    ]:
+        for el in soup.select(sel):
+            text = " ".join(el.get_text(" ", strip=True).split()).strip()
+            if re.fullmatch(r"[A-Za-z .'-]{3,100}", text):
+                return text
+    return ""
+
+
+def extract_english_name_from_url(url: str) -> str:
+    try:
+        parts = re.split(r"[/_-]+", urlparse(url).path)
+        parts = [p for p in parts if p.isalpha() and len(p) > 2]
+        if 2 <= len(parts) <= 4:
+            return " ".join(p.capitalize() for p in parts)
+    except Exception:
+        pass
+    return ""
+
+
+def extract_english_name_from_email(email: str) -> str:
+    if "@" not in email:
+        return ""
+    local = email.split("@")[0]
+    parts = re.split(r"[._-]+", local)
+    if 2 <= len(parts) <= 4:
+        return " ".join(p.capitalize() for p in parts)
+    return ""
+
+
+def find_profile_image_url(html: str, base_url: str = "") -> str:
+    if not html:
+        return ""
+    soup = BeautifulSoup(html, "html.parser")
+    for sel in [
+        "img.profile", "img.professor", ".professor-photo img", ".faculty-photo img",
+        ".profile-image img", ".member-photo img", ".photo img", ".thumb img", "img",
+    ]:
+        for img in soup.select(sel):
+            src = (img.get("src") or "").strip()
+            alt = (img.get("alt") or "").strip().casefold()
+            if not src:
+                continue
+            if any(bad in src.casefold() for bad in ["logo", "icon", "banner", "btn", "background"]):
+                continue
+            if base_url:
+                src = urljoin(base_url, src)
+            if "prof" in alt or "faculty" in alt or "교수" in alt or sel != "img":
+                return src
+    return ""
+
+
+def _preprocess_name_image(img: Image.Image) -> Image.Image:
+    gray = ImageOps.grayscale(img)
+    gray = ImageOps.autocontrast(gray)
+    w, h = gray.size
+    gray = gray.resize((max(w * 3, 300), max(h * 3, 120)))
+    gray = gray.filter(ImageFilter.SHARPEN)
+    bw = gray.point(lambda x: 255 if x > 165 else 0)
+    return bw
+
+
+def _looks_like_english_name(text: str) -> bool:
+    s = " ".join(str(text or "").split()).strip()
+    if not s:
+        return False
+    if not re.fullmatch(r"[A-Za-z][A-Za-z .,'()/-]{2,100}", s):
+        return False
+    s2 = re.sub(r"[()]", "", s).strip()
+    words = [w for w in re.split(r"\s+", s2) if w]
+    if not (2 <= len(words) <= 4):
+        return False
+    bad_words = {
+        "professor", "associate", "assistant", "emeritus", "department", "college",
+        "university", "school", "medicine", "medical", "research", "laboratory",
+        "lab", "director", "chair", "faculty", "staff", "member",
+    }
+    return not any(w.casefold().strip(".,") in bad_words for w in words)
+
+
+def _extract_name_candidates(text: str) -> list[str]:
+    results: list[str] = []
+    for line in text.splitlines():
+        s = " ".join(str(line or "").split()).strip()
+        if not s:
+            continue
+        s = s.replace("|", "I").replace("0", "O").replace("1", "I")
+        if _looks_like_english_name(s):
+            results.append(s)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for r in results:
+        key = r.casefold()
+        if key not in seen:
+            seen.add(key)
+            deduped.append(r)
+    return deduped
+
+
+def _choose_best_name(candidates: list[str], email: str = "", source_url: str = "") -> str:
+    def score(name: str) -> int:
+        s = 0
+        words = name.lower().split()
+        if 2 <= len(words) <= 3:
+            s += 2
+        if email and "@" in email:
+            email_id = email.split("@", 1)[0].lower().strip()
+            email_parts = [p for p in re.split(r"[._-]", email_id) if p]
+            compact = name.lower().replace(" ", "").replace("-", "")
+            if any(part in compact for part in email_parts):
+                s += 3
+        if source_url:
+            compact_slug = name.lower().replace(" ", "-").replace(".", "")
+            if compact_slug in source_url.lower():
+                s += 3
+        return s
+
+    if not candidates:
+        return ""
+    return sorted(candidates, key=lambda x: (score(x), len(x)), reverse=True)[0]
+
+
+def extract_english_name_from_image(image_url: str, *, email: str = "", source_url: str = "") -> str:
+    if not image_url:
+        return ""
+    try:
+        res = requests.get(image_url, timeout=10)
+        res.raise_for_status()
+        img = Image.open(io.BytesIO(res.content)).convert("RGB")
+    except Exception:
+        return ""
+
+    variants = [img]
+    w, h = img.size
+    if h > 80:
+        variants.append(img.crop((0, 0, w, int(h * 0.5))))
+    if w > 120 and h > 80:
+        variants.append(img.crop((int(w * 0.15), 0, int(w * 0.85), int(h * 0.5))))
+
+    all_candidates: list[str] = []
+    for v in variants:
+        processed = _preprocess_name_image(v)
+        try:
+            text = pytesseract.image_to_string(processed, lang="eng", config="--psm 6")
+        except Exception:
+            continue
+        all_candidates.extend(_extract_name_candidates(text))
+    return _choose_best_name(all_candidates, email=email, source_url=source_url)
+
+
+def enrich_english_query(query: str, html: str, url: str, email: str) -> tuple[str, str]:
+    if query:
+        return query, "existing"
+
+    html_name = extract_english_name_from_html(html)
+    if html_name:
+        return html_name, "html"
+
+    url_name = extract_english_name_from_url(url)
+    if url_name:
+        return url_name, "url"
+
+    email_name = extract_english_name_from_email(email)
+    if email_name:
+        return email_name, "email"
+
+    image_url = find_profile_image_url(html, base_url=url)
+    if image_url:
+        ocr_name = extract_english_name_from_image(image_url, email=email, source_url=url)
+        if ocr_name:
+            return ocr_name, "ocr"
+
+    return "", ""
 
 
 def extract_paper_metadata(pdf_path: Path) -> dict[str, str]:
@@ -4354,6 +4541,8 @@ def parse_department_list_page_from_urls(
     ko_en_map: dict[str, str] = {}
     titles: list[str] = []
     emails: list[str] = []
+    ko_html = ""
+    en_html = ""
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -4396,20 +4585,31 @@ def parse_department_list_page_from_urls(
         clean_name = registry_clean_professor_name(name)
         if not registry_is_valid_professor_name(clean_name):
             continue
-        query = _normalize_english_professor_name(matched.get(name, "") or matched.get(clean_name, ""))
+
+        query = _normalize_english_professor_name(
+            matched.get(name, "") or matched.get(clean_name, "")
+        )
+
+        resolved_query, query_source = enrich_english_query(
+            query=query,
+            html=ko_html if source.url_ko else "",
+            url=source.url_ko or source.url_en or "",
+            email=default_email,
+        )
+
         rows.append(
             ProfessorResultRow(
                 group=source.group,
                 department=source.department_ko,
                 name=clean_name,
-                query=query,
+                query=resolved_query,
                 title=default_title,
                 email=default_email,
                 affiliation="Yonsei University College of Medicine",
                 source_url=source.url_ko,
                 source_url_en=source.url_en,
-                match_status="matched" if query else "missing_en",
-                review_status="pending",
+                match_status=(f"query:{query_source}" if query_source else ""),
+                review_status=("pending" if resolved_query else "name_check_needed"),
             )
         )
     return rows
