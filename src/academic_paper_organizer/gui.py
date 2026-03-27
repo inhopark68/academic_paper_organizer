@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import csv
 import queue
+import tempfile
 import threading
 import time
 from dataclasses import asdict, dataclass
@@ -475,14 +476,23 @@ class ProfessorManagerApp:
     def _open_results_editor(self, rows: list[ProfessorResultRow], *, source_label: str = "수집 결과", source_file: str | None = None) -> None:
         win = tk.Toplevel(self.root)
         win.title(source_label)
-        win.geometry("1380x760")
+        win.geometry("1460x820")
 
         current_rows = list(rows)
+        visible_rows = list(rows)
         current_file = {"path": source_file or ""}
+        item_to_row: dict[str, ProfessorResultRow] = {}
 
         top = ttk.Frame(win, padding=8)
         top.pack(fill="x")
         ttk.Label(top, text=source_label).pack(side="left")
+
+        search_bar = ttk.Frame(win, padding=(8, 4, 8, 0))
+        search_bar.pack(fill="x")
+        ttk.Label(search_bar, text="교수명 검색").pack(side="left")
+        search_var = tk.StringVar(value="")
+        search_entry = ttk.Entry(search_bar, textvariable=search_var, width=24)
+        search_entry.pack(side="left", padx=(6, 8))
 
         btns = ttk.Frame(win, padding=(8,0))
         btns.pack(fill="x")
@@ -507,25 +517,21 @@ class ProfessorManagerApp:
 
         selection_state_var = tk.StringVar(value="선택된 항목: 0 / 0")
 
-        def update_selection_summary() -> None:
-            total = len(current_rows)
-            selected = len(tree.selection())
-            selection_state_var.set(f"선택된 항목: {selected} / {total}")
+        def get_filtered_rows() -> list[ProfessorResultRow]:
+            keyword = search_var.get().strip().casefold()
+            if not keyword:
+                return list(current_rows)
+            return [
+                row for row in current_rows
+                if keyword in str(row.name).casefold()
+                or keyword in str(row.query).casefold()
+                or keyword in str(row.department).casefold()
+                or keyword in str(row.email).casefold()
+            ]
 
-        def refresh() -> None:
-            current_selection = set(tree.selection())
-            for item in tree.get_children():
-                tree.delete(item)
-            for row in current_rows:
-                item_id = tree.insert(
-                    "",
-                    "end",
-                    text="☐",
-                    values=(row.group, row.department, row.name, row.query, row.title, row.email, row.match_status, row.review_status),
-                )
-                if item_id in current_selection:
-                    tree.selection_add(item_id)
-            update_selection_summary()
+        def update_selection_summary() -> None:
+            selected = len(tree.selection())
+            selection_state_var.set(f"선택된 항목: {selected} / 현재목록 {len(visible_rows)} / 전체 {len(current_rows)}")
 
         def sync_selected_markers(_event=None) -> None:
             selected = set(tree.selection())
@@ -533,9 +539,27 @@ class ProfessorManagerApp:
                 tree.item(item, text="☑" if item in selected else "☐")
             update_selection_summary()
 
-        def selected_indices() -> list[int]:
-            items = tree.selection()
-            return [tree.index(i) for i in items]
+        def refresh() -> None:
+            nonlocal visible_rows
+            previously_selected_rows = {item_to_row[item] for item in tree.selection() if item in item_to_row}
+            visible_rows = get_filtered_rows()
+            item_to_row.clear()
+            for item in tree.get_children():
+                tree.delete(item)
+            for row in visible_rows:
+                item_id = tree.insert(
+                    "",
+                    "end",
+                    text="☐",
+                    values=(row.group, row.department, row.name, row.query, row.title, row.email, row.match_status, row.review_status),
+                )
+                item_to_row[item_id] = row
+                if row in previously_selected_rows:
+                    tree.selection_add(item_id)
+            sync_selected_markers()
+
+        def selected_rows() -> list[ProfessorResultRow]:
+            return [item_to_row[item] for item in tree.selection() if item in item_to_row]
 
         def select_all() -> None:
             items = tree.get_children()
@@ -547,13 +571,19 @@ class ProfessorManagerApp:
             tree.selection_remove(tree.selection())
             sync_selected_markers()
 
+        def apply_search(_event=None) -> None:
+            refresh()
+
+        def clear_search() -> None:
+            search_var.set("")
+            refresh()
+
         def delete_selected() -> None:
-            idxs = sorted(selected_indices(), reverse=True)
-            if not idxs:
+            rows_to_remove = set(selected_rows())
+            if not rows_to_remove:
                 messagebox.showwarning("선택 필요", "삭제할 행을 선택하세요.")
                 return
-            for idx in idxs:
-                current_rows.pop(idx)
+            current_rows[:] = [row for row in current_rows if row not in rows_to_remove]
             refresh()
 
         def save_all() -> None:
@@ -566,15 +596,70 @@ class ProfessorManagerApp:
             self.append_log(f"[YONSEI-EDIT] 저장 완료: {path} | {len(current_rows)}명")
 
         def save_selected() -> None:
-            idxs = selected_indices()
-            if not idxs:
+            rows_to_save = selected_rows()
+            if not rows_to_save:
                 messagebox.showwarning("선택 필요", "저장할 행을 선택하세요.")
                 return
             path = filedialog.asksaveasfilename(title="선택 교수명단 CSV 저장", defaultextension=".csv", initialdir=self.output_dir_var.get() or str(Path.home()), initialfile="professors_selected.csv", filetypes=[("CSV", "*.csv")])
             if not path:
                 return
-            export_professor_results_csv(path, [current_rows[i] for i in idxs])
-            self.append_log(f"[YONSEI-EDIT] 선택 저장 완료: {path} | {len(idxs)}명")
+            export_professor_results_csv(path, rows_to_save)
+            self.append_log(f"[YONSEI-EDIT] 선택 저장 완료: {path} | {len(rows_to_save)}명")
+
+        def run_achievements_for_rows(target_rows: list[ProfessorResultRow], mode_label: str) -> None:
+            if not target_rows:
+                messagebox.showwarning("대상 필요", f"성과 분석할 {mode_label} 교수를 찾지 못했습니다.")
+                return
+            try:
+                per_limit = int(self.limit_var.get().strip() or "20")
+            except ValueError:
+                messagebox.showwarning("입력 오류", "교수당 최대 논문 수는 숫자여야 합니다.")
+                return
+            default_dir = Path(self.output_dir_var.get().strip() or str(Path.home()))
+            filename_suffix = f"{mode_label}_{time.strftime('%Y%m%d_%H%M%S')}"
+            out = filedialog.asksaveasfilename(
+                title=f"{mode_label} 교수성과 CSV 저장",
+                defaultextension=".csv",
+                initialdir=str(default_dir),
+                initialfile=f"professor_achievements_{filename_suffix}.csv",
+                filetypes=[("CSV", "*.csv")],
+            )
+            if not out:
+                return
+
+            with tempfile.NamedTemporaryFile("w", delete=False, suffix=".csv", encoding="utf-8-sig", newline="") as tmp:
+                tmp_path = tmp.name
+            export_professor_results_csv(tmp_path, target_rows)
+            self.append_log(f"[PROF] 성과 조회 시작 | 모드={mode_label} | 대상 교수 {len(target_rows)}명")
+
+            def worker() -> None:
+                try:
+                    result = export_professor_achievements_csv(
+                        tmp_path,
+                        out,
+                        email=self.email_var.get().strip(),
+                        per_professor_limit=per_limit,
+                        group_filter="전체",
+                        logger=self.append_log,
+                    )
+                    self.root.after(0, lambda: self.status_var.set(f"교수성과 CSV 생성 완료: {result.get('papers', 0)}건"))
+                    PLACEHOLDER
+                except Exception as exc:
+                    self.append_log(f"[PROF-ERROR] {exc}")
+                    self.root.after(0, lambda: messagebox.showerror("오류", str(exc)))
+                finally:
+                    try:
+                        Path(tmp_path).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def analyze_selected() -> None:
+            run_achievements_for_rows(selected_rows(), "선택")
+
+        def analyze_searched() -> None:
+            run_achievements_for_rows(list(visible_rows), "검색")
 
         def reload_current() -> None:
             path = current_file['path']
@@ -607,17 +692,21 @@ class ProfessorManagerApp:
             refresh()
             self.append_log(f"[YONSEI-EDIT] 교수명단 열기 완료: {path} | {len(loaded)}명")
 
+        ttk.Button(search_bar, text="검색", command=apply_search).pack(side="left", padx=4)
+        ttk.Button(search_bar, text="검색 초기화", command=clear_search).pack(side="left", padx=4)
         ttk.Button(btns, text="전체 선택", command=select_all).pack(side="left", padx=4)
         ttk.Button(btns, text="전체 선택 해제", command=clear_selection).pack(side="left", padx=4)
         ttk.Button(btns, text="선택 삭제", command=delete_selected).pack(side="left", padx=4)
+        ttk.Button(btns, text="선택 교수 성과 수집", command=analyze_selected).pack(side="left", padx=4)
+        ttk.Button(btns, text="검색 결과 성과 분석", command=analyze_searched).pack(side="left", padx=4)
         ttk.Button(btns, text="현재 목록 저장", command=save_all).pack(side="left", padx=4)
         ttk.Button(btns, text="선택만 저장", command=save_selected).pack(side="left", padx=4)
         ttk.Button(btns, text="현재 파일 다시 불러오기", command=reload_current).pack(side="left", padx=4)
         ttk.Button(btns, text="다른 파일 열기", command=open_other).pack(side="left", padx=4)
         ttk.Label(selection_bar, textvariable=selection_state_var).pack(side="left")
         tree.bind("<<TreeviewSelect>>", sync_selected_markers)
+        search_entry.bind("<Return>", apply_search)
         refresh()
-        sync_selected_markers()
 
     def export_achievements(self) -> None:
         professors_file = self.professors_csv_var.get().strip()

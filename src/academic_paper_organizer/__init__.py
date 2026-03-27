@@ -18,8 +18,7 @@ except Exception:
 
 from .gui import (
     AppConfig,
-    FilteringEventHandler,
-    OrganizerGUI,
+    ProfessorManagerApp,
 )
 
 __all__ = [
@@ -35,6 +34,5 @@ __all__ = [
     "export_professor_achievements_csv",
     "export_latest_yonsei_professors_csv",
     "AppConfig",
-    "FilteringEventHandler",
-    "OrganizerGUI",
+    "ProfessorManagerApp",
 ]
