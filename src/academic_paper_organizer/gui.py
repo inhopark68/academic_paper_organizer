@@ -1,17 +1,18 @@
-
 from __future__ import annotations
 
 import csv
 import queue
+import tempfile
 import threading
 import time
+import webbrowser
 from dataclasses import asdict, dataclass
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 try:
-    from .professor_core import (
+    from .core import (
         ProfessorSourceRow,
         ProfessorResultRow,
         create_professor_source_registry_template,
@@ -23,7 +24,7 @@ try:
         save_professor_source_registry,
     )
 except Exception:
-    from professor_core import (
+    from core import (
         ProfessorSourceRow,
         ProfessorResultRow,
         create_professor_source_registry_template,
@@ -88,6 +89,8 @@ class ProfessorManagerApp:
         self.email_var = tk.StringVar(value=self.config.achievements_email)
         self.limit_var = tk.StringVar(value=self.config.per_professor_limit)
         self.status_var = tk.StringVar(value="대기 중")
+        self.ach_search_var = tk.StringVar(value="")
+        self.achievement_result_csv_var = tk.StringVar(value="")
 
         self.src_id_var = tk.StringVar(value="")
         self.src_group_var = tk.StringVar(value="기초의학")
@@ -101,20 +104,23 @@ class ProfessorManagerApp:
 
         self.registry_rows: list[ProfessorSourceRow] = []
         self.collected_rows: list[ProfessorResultRow] = []
+        self.achievement_prof_rows: list[ProfessorResultRow] = []
+        self.achievement_prof_tree = None
+        self.achievement_job_running = False
+        self.completion_popup = None
+        self.result_window = None
+        self.result_window_path = ""
         self.log_queue: queue.Queue[str] = queue.Queue()
         self.sort_state: dict[str, dict[str, bool]] = {}
         self.tree_heading_texts: dict[str, dict[str, str]] = {}
-        self.notebook: ttk.Notebook | None = None
-        self.achievements_tab: ttk.Frame | None = None
-        self.collect_tab: ttk.Frame | None = None
-        self.results_editor_host: ttk.LabelFrame | None = None
-        self.results_editor_placeholder: ttk.Label | None = None
 
         self._build_ui()
         self.root.after(120, self._drain_log_queue)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         if self.registry_csv_var.get():
             self._try_load_registry(self.registry_csv_var.get())
+        if self.professors_csv_var.get():
+            self.load_achievement_professor_list()
         self.append_log("[APP] 교수성과 관리 시스템 시작")
 
     def _get_tree_sort_key(self, tree: ttk.Treeview, item_id: str, column: str):
@@ -182,40 +188,6 @@ class ProfessorManagerApp:
                 command=lambda c=col, tn=tree_name, tr=tree: self.sort_tree_by(tn, tr, c),
             )
 
-    def _focus_achievements_tab(self) -> None:
-        if self.notebook is not None and self.achievements_tab is not None:
-            try:
-                self.notebook.select(self.achievements_tab)
-                self.root.update_idletasks()
-            except Exception:
-                pass
-
-    def _position_window_below_achievements(self, win: tk.Toplevel) -> None:
-        self._focus_achievements_tab()
-        self.root.update_idletasks()
-        win.update_idletasks()
-
-        root_x = self.root.winfo_rootx()
-        root_y = self.root.winfo_rooty()
-        root_w = max(self.root.winfo_width(), 1200)
-        root_h = max(self.root.winfo_height(), 760)
-
-        desired_w = max(min(root_w - 40, 1500), 1100)
-        desired_h = max(root_h // 2 - 20, 320)
-
-        x = root_x + 12
-        y = root_y + (root_h // 2) + 10
-
-        try:
-            screen_w = win.winfo_screenwidth()
-            screen_h = win.winfo_screenheight()
-            desired_w = min(desired_w, max(screen_w - x - 20, 900))
-            desired_h = min(desired_h, max(screen_h - y - 60, 260))
-        except Exception:
-            pass
-
-        win.geometry(f"{desired_w}x{desired_h}+{x}+{y}")
-
     def _build_ui(self) -> None:
         style = ttk.Style()
         if "clam" in style.theme_names():
@@ -245,21 +217,21 @@ class ProfessorManagerApp:
 
         ttk.Label(outer, textvariable=self.status_var).pack(fill="x", pady=(6, 6))
 
-        self.notebook = ttk.Notebook(outer)
-        self.notebook.pack(fill="both", expand=True)
+        notebook = ttk.Notebook(outer)
+        notebook.pack(fill="both", expand=True)
 
-        registry_tab = ttk.Frame(self.notebook, padding=10)
-        self.collect_tab = ttk.Frame(self.notebook, padding=10)
-        self.achievements_tab = ttk.Frame(self.notebook, padding=10)
-        log_tab = ttk.Frame(self.notebook, padding=10)
-        self.notebook.add(registry_tab, text="URL 등록")
-        self.notebook.add(self.collect_tab, text="교수정보 수집")
-        self.notebook.add(self.achievements_tab, text="교수성과")
-        self.notebook.add(log_tab, text="로그")
+        registry_tab = ttk.Frame(notebook, padding=10)
+        collect_tab = ttk.Frame(notebook, padding=10)
+        achievements_tab = ttk.Frame(notebook, padding=10)
+        log_tab = ttk.Frame(notebook, padding=10)
+        notebook.add(registry_tab, text="URL 등록")
+        notebook.add(collect_tab, text="교수정보 수집")
+        notebook.add(achievements_tab, text="교수성과")
+        notebook.add(log_tab, text="로그")
 
         self._build_registry_tab(registry_tab)
-        self._build_collect_tab(self.collect_tab)
-        self._build_achievements_tab(self.achievements_tab)
+        self._build_collect_tab(collect_tab)
+        self._build_achievements_tab(achievements_tab)
         self._build_log_tab(log_tab)
 
     def _build_registry_tab(self, parent: ttk.Frame) -> None:
@@ -319,19 +291,7 @@ class ProfessorManagerApp:
         hsb.pack(side="bottom", fill="x")
 
     def _build_collect_tab(self, parent: ttk.Frame) -> None:
-        parent.columnconfigure(0, weight=1, uniform="collect")
-        parent.columnconfigure(1, weight=1, uniform="collect")
-        parent.rowconfigure(0, weight=1)
-
-        left = ttk.Frame(parent)
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
-        right = ttk.Frame(parent)
-        right.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
-        left.columnconfigure(0, weight=1)
-        right.columnconfigure(0, weight=1)
-        right.rowconfigure(0, weight=1)
-
-        top = ttk.LabelFrame(left, text="교수정보 수집", padding=10)
+        top = ttk.LabelFrame(parent, text="교수정보 수집", padding=10)
         top.pack(fill="x")
         ttk.Label(top, text="수집 구분").grid(row=0, column=0, sticky="w", padx=(0, 6))
         ttk.Combobox(top, textvariable=self.collect_group_var, values=GROUPS, state="readonly").grid(row=0, column=1, sticky="w")
@@ -339,25 +299,15 @@ class ProfessorManagerApp:
         ttk.Button(top, text="최신 교수명단 등록", command=self.register_latest_professors).grid(row=0, column=3, padx=6)
         ttk.Button(top, text="교수명단 파일 열기/편집", command=self.open_professor_results_file).grid(row=0, column=4, padx=6)
 
-        info = ttk.LabelFrame(left, text="설명", padding=10)
+        info = ttk.LabelFrame(parent, text="설명", padding=10)
         info.pack(fill="both", expand=True, pady=(10, 0))
         msg = (
             "1. URL 등록 탭에서 국문/영문 교실 URL을 등록합니다.\n"
             "2. 등록 URL로 교수정보 수집을 실행하면 등록된 URL만 대상으로 CSV용 교수명단을 생성합니다.\n"
-            "3. 오른쪽 영역에서 교수명단 파일 열기/편집/저장을 바로 진행할 수 있습니다.\n"
+            "3. 수집 결과 검토 창에서 선택 삭제, 전체 저장, 선택만 저장을 할 수 있습니다.\n"
             "4. 최신 교수명단 등록은 기존 자동 수집 기능을 별도 경로로 유지합니다."
         )
         ttk.Label(info, text=msg, justify="left").pack(anchor="w")
-
-        self.results_editor_host = ttk.LabelFrame(right, text="교수명단 파일 열기 / 편집 / 저장", padding=8)
-        self.results_editor_host.grid(row=0, column=0, sticky="nsew")
-
-        self.results_editor_placeholder = ttk.Label(
-            self.results_editor_host,
-            text="교수명단 CSV를 열거나 URL 수집 결과를 불러오면 이 영역에 목록이 표시됩니다.",
-            justify="left",
-        )
-        self.results_editor_placeholder.pack(anchor="w", fill="x")
 
     def _build_achievements_tab(self, parent: ttk.Frame) -> None:
         top = ttk.LabelFrame(parent, text="교수성과 CSV 생성", padding=10)
@@ -367,6 +317,7 @@ class ProfessorManagerApp:
         ttk.Label(top, text="교수명단 CSV").grid(row=0, column=0, sticky="w", padx=(0, 6), pady=3)
         ttk.Entry(top, textvariable=self.professors_csv_var).grid(row=0, column=1, sticky="ew", pady=3)
         ttk.Button(top, text="찾아보기", command=self.pick_professors_csv).grid(row=0, column=2, padx=6, pady=3)
+        ttk.Button(top, text="명단 새로고침", command=self.load_achievement_professor_list).grid(row=0, column=3, padx=6, pady=3)
 
         ttk.Label(top, text="구분").grid(row=1, column=0, sticky="w", padx=(0, 6), pady=3)
         ttk.Combobox(top, textvariable=self.ach_group_var, values=GROUPS, state="readonly").grid(row=1, column=1, sticky="w", pady=3)
@@ -374,8 +325,62 @@ class ProfessorManagerApp:
         ttk.Entry(top, textvariable=self.email_var).grid(row=2, column=1, sticky="ew", pady=3)
         ttk.Label(top, text="교수당 최대 논문 수").grid(row=3, column=0, sticky="w", padx=(0, 6), pady=3)
         ttk.Entry(top, textvariable=self.limit_var, width=12).grid(row=3, column=1, sticky="w", pady=3)
-        ttk.Button(top, text="교수성과 CSV 생성", command=self.export_achievements).grid(row=4, column=1, sticky="w", pady=(8, 0))
 
+        action_row = ttk.Frame(top)
+        action_row.grid(row=4, column=1, columnspan=3, sticky="w", pady=(8, 0))
+        self.export_all_btn = ttk.Button(action_row, text="단체 성과 CSV 생성", command=self.export_achievements)
+        self.export_all_btn.pack(side="left")
+        self.export_selected_btn = ttk.Button(action_row, text="선택 개인 성과 CSV 생성", command=self.export_selected_achievements)
+        self.export_selected_btn.pack(side="left", padx=6)
+
+        list_box = ttk.LabelFrame(parent, text="교수명단 선택", padding=8)
+        list_box.pack(fill="both", expand=True, pady=(10, 0))
+        list_box.columnconfigure(1, weight=1)
+        list_box.rowconfigure(1, weight=1)
+
+        ttk.Label(list_box, text="검색").grid(row=0, column=0, sticky="w", padx=(0, 6), pady=(0, 6))
+        search_entry = ttk.Entry(list_box, textvariable=self.ach_search_var)
+        search_entry.grid(row=0, column=1, sticky="ew", pady=(0, 6))
+        ttk.Button(list_box, text="검색", command=self.refresh_achievement_professor_tree).grid(row=0, column=2, padx=6, pady=(0, 6))
+        ttk.Button(list_box, text="검색 초기화", command=lambda: (self.ach_search_var.set(""), self.refresh_achievement_professor_tree())).grid(row=0, column=3, padx=6, pady=(0, 6))
+
+        tree_frame = ttk.Frame(list_box)
+        tree_frame.grid(row=1, column=0, columnspan=4, sticky="nsew")
+        tree_frame.rowconfigure(0, weight=1)
+        tree_frame.columnconfigure(0, weight=1)
+
+        columns = ("group", "department", "name", "query", "title", "email", "review_status")
+        tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="extended")
+        headings = {
+            "group": "구분",
+            "department": "교실",
+            "name": "교수명",
+            "query": "영문이름(Query)",
+            "title": "직위",
+            "email": "이메일",
+            "review_status": "검토",
+        }
+        widths = {"group": 80, "department": 180, "name": 110, "query": 220, "title": 120, "email": 220, "review_status": 90}
+        self._bind_tree_sorting("achievement_prof_tree", tree, headings)
+        for c in columns:
+            tree.column(c, width=widths[c], anchor="w")
+        tree.grid(row=0, column=0, sticky="nsew")
+        ysb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+        xsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=ysb.set, xscrollcommand=xsb.set)
+        ysb.grid(row=0, column=1, sticky="ns")
+        xsb.grid(row=1, column=0, sticky="ew")
+        self.achievement_prof_tree = tree
+
+    def _set_achievement_buttons_enabled(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        for attr in ("export_all_btn", "export_selected_btn"):
+            btn = getattr(self, attr, None)
+            if btn is not None:
+                try:
+                    btn.config(state=state)
+                except Exception:
+                    pass
 
     def _build_log_tab(self, parent: ttk.Frame) -> None:
         log_frame = ttk.Frame(parent)
@@ -563,6 +568,7 @@ class ProfessorManagerApp:
             try:
                 export_latest_yonsei_professors_csv(out, group_filter=group, logger=self.append_log)
                 self.professors_csv_var.set(out)
+                self.root.after(0, self.load_achievement_professor_list)
                 self.root.after(0, lambda: self._open_professors_csv_editor(out, source_label=f"최신 교수명단 | {group}"))
                 self.root.after(0, lambda: self.status_var.set(f"최신 교수명단 등록 완료: {Path(out).name}"))
             except Exception as exc:
@@ -575,6 +581,7 @@ class ProfessorManagerApp:
         path = filedialog.askopenfilename(title="교수명단 CSV 선택", filetypes=[("CSV", "*.csv")], initialdir=self.output_dir_var.get() or str(Path.home()))
         if path:
             self.professors_csv_var.set(path)
+            self.load_achievement_professor_list()
 
     def open_professor_results_file(self) -> None:
         path = self.professors_csv_var.get().strip()
@@ -613,30 +620,443 @@ class ProfessorManagerApp:
             return
         self._open_results_editor(rows, source_label=source_label, source_file=path)
 
-    def _open_results_editor(self, rows: list[ProfessorResultRow], *, source_label: str = "수집 결과", source_file: str | None = None) -> None:
-        self._focus_achievements_tab()
+    def load_achievement_professor_list(self) -> None:
+        path = self.professors_csv_var.get().strip()
+        if not path:
+            return
+        try:
+            self.achievement_prof_rows = self._load_professor_results_from_csv(path)
+        except Exception as exc:
+            messagebox.showerror("오류", f"교수명단 CSV를 열지 못했습니다.\n{exc}")
+            return
+        self.refresh_achievement_professor_tree()
 
-        host = self.results_editor_host
-        if host is None:
-            messagebox.showerror("오류", "교수명단 편집 영역을 초기화하지 못했습니다.")
+    def refresh_achievement_professor_tree(self) -> None:
+        tree = self.achievement_prof_tree
+        if tree is None:
+            return
+        keyword = self.ach_search_var.get().strip().casefold()
+        for item in tree.get_children():
+            tree.delete(item)
+        for row in self.achievement_prof_rows:
+            hay = " | ".join([row.group, row.department, row.name, row.query, row.title, row.email, row.review_status]).casefold()
+            if keyword and keyword not in hay:
+                continue
+            tree.insert("", "end", values=(row.group, row.department, row.name, row.query, row.title, row.email, row.review_status))
+
+    def export_selected_achievements(self) -> None:
+        if self.achievement_job_running:
+            messagebox.showwarning("작업 진행 중", "이미 성과 CSV 생성 작업이 진행 중입니다.")
             return
 
-        for child in host.winfo_children():
-            child.destroy()
+        self.achievement_job_running = True
+        self._set_achievement_buttons_enabled(False)
+
+        tree = self.achievement_prof_tree
+        if tree is None:
+            self.achievement_job_running = False
+            self._set_achievement_buttons_enabled(True)
+            messagebox.showwarning("목록 필요", "교수명단 목록이 준비되지 않았습니다.")
+            return
+        selected = tree.selection()
+        if not selected:
+            self.achievement_job_running = False
+            self._set_achievement_buttons_enabled(True)
+            messagebox.showwarning("선택 필요", "성과를 생성할 교수를 선택하세요.")
+            return
+
+        values_set = {tree.item(item, "values") for item in selected}
+        selected_rows: list[ProfessorResultRow] = []
+        for row in self.achievement_prof_rows:
+            key = (row.group, row.department, row.name, row.query, row.title, row.email, row.review_status)
+            if key in values_set:
+                selected_rows.append(row)
+
+        if not selected_rows:
+            self.achievement_job_running = False
+            self._set_achievement_buttons_enabled(True)
+            messagebox.showwarning("선택 필요", "선택된 교수 데이터를 찾지 못했습니다.")
+            return
+
+        try:
+            per_limit = int(self.limit_var.get().strip() or "20")
+        except ValueError:
+            self.achievement_job_running = False
+            self._set_achievement_buttons_enabled(True)
+            messagebox.showwarning("입력 오류", "교수당 최대 논문 수는 숫자여야 합니다.")
+            return
+
+        default_dir = Path(self.output_dir_var.get().strip() or str(Path.home()))
+        out = filedialog.asksaveasfilename(
+            title="선택 개인 성과 CSV 저장",
+            defaultextension=".csv",
+            initialdir=str(default_dir),
+            initialfile=f"professor_selected_achievements_{time.strftime('%Y%m%d_%H%M%S')}.csv",
+            filetypes=[("CSV", "*.csv")],
+        )
+        if not out:
+            self.achievement_job_running = False
+            self._set_achievement_buttons_enabled(True)
+            return
+
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, encoding="utf-8-sig", newline="") as tf:
+                tmp_path = tf.name
+            export_professor_results_csv(tmp_path, selected_rows)
+        except Exception as exc:
+            if tmp_path:
+                try:
+                    Path(tmp_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
+            self.achievement_job_running = False
+            self._set_achievement_buttons_enabled(True)
+            messagebox.showerror("오류", f"선택 교수 임시 CSV 생성 실패\n{exc}")
+            return
+
+        group = self.ach_group_var.get().strip() or "전체"
+        self.append_log(f"[PROF] 선택 개인 성과 조회 시작 | {len(selected_rows)}명 | 구분={group}")
+
+        def worker() -> None:
+            try:
+                result = export_professor_achievements_csv(
+                    tmp_path,
+                    out,
+                    email=self.email_var.get().strip(),
+                    per_professor_limit=per_limit,
+                    group_filter=group,
+                    logger=self.append_log,
+                )
+                def done() -> None:
+                    self.append_log(f"[PROF] 선택 성과 완료 콜백 실행: {out}")
+                    self.achievement_result_csv_var.set(out)
+                    self.status_var.set(f"선택 개인 성과 CSV 생성 완료: {result.get('papers', 0)}건")
+                    self._show_completion_with_result_button(
+                        "완료",
+                        f"선택 개인 성과 CSV 생성 완료\n{out}",
+                        out,
+                    )
+                self.root.after(0, done)
+            except Exception as exc:
+                self.append_log(f"[PROF-ERROR] {exc}")
+                self.root.after(0, lambda: messagebox.showerror("오류", str(exc)))
+            finally:
+                self.root.after(0, lambda: setattr(self, "achievement_job_running", False))
+                self.root.after(0, lambda: self._set_achievement_buttons_enabled(True))
+                try:
+                    Path(tmp_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def open_achievement_result_file(self, path: str | None = None) -> None:
+        target = str(path or self.achievement_result_csv_var.get().strip() or "").strip()
+        self.append_log(f"[RESULT] open_achievement_result_file 호출: {target}")
+
+        if not target:
+            target = filedialog.askopenfilename(
+                title="성과결과 CSV 열기",
+                filetypes=[("CSV", "*.csv")],
+                initialdir=self.output_dir_var.get() or str(Path.home()),
+            )
+            if not target:
+                return
+            self.achievement_result_csv_var.set(target)
+
+        csv_path = Path(target)
+        if not csv_path.exists():
+            messagebox.showerror("오류", f"결과 파일을 찾을 수 없습니다.\n{target}")
+            return
+
+        try:
+            if self.result_window is not None and self.result_window.winfo_exists():
+                if self.result_window_path == str(csv_path):
+                    self.append_log(f"[RESULT] 이미 열린 결과창 재사용: {csv_path}")
+                    self.result_window.lift()
+                    self.result_window.focus_force()
+                    return
+                else:
+                    self.append_log(f"[RESULT] 기존 결과창 닫고 새 파일 열기: {csv_path}")
+                    self.result_window.destroy()
+        except Exception:
+            pass
+
+        self.append_log(f"[RESULT] 결과창 생성 시작: {csv_path}")
+
+        try:
+            with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
+                reader = csv.DictReader(f)
+                fieldnames = list(reader.fieldnames or [])
+                rows = list(reader)
+        except Exception as exc:
+            messagebox.showerror("오류", f"결과 파일을 열지 못했습니다.\n{exc}")
+            return
+
+        win = tk.Toplevel(self.root)
+        self.result_window = win
+        self.result_window_path = str(csv_path)
+
+        def _close_result_window() -> None:
+            try:
+                win.destroy()
+            finally:
+                if self.result_window is win:
+                    self.result_window = None
+                    self.result_window_path = ""
+
+        win.protocol("WM_DELETE_WINDOW", _close_result_window)
+        win.title(f"교수성과 결과 | {csv_path.name}")
+        win.geometry("1500x820")
+
+        selected_map: dict[str, tk.BooleanVar] = {
+            col: tk.BooleanVar(value=True) for col in fieldnames
+        }
+
+        outer = ttk.Frame(win, padding=8)
+        outer.pack(fill="both", expand=True)
+        outer.rowconfigure(1, weight=1)
+        outer.columnconfigure(0, weight=1)
+        outer.columnconfigure(1, weight=4)
+
+        top = ttk.Frame(outer)
+        top.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        top.columnconfigure(0, weight=1)
+        ttk.Label(top, text=str(csv_path)).grid(row=0, column=0, sticky="w")
+
+        selector = ttk.LabelFrame(outer, text="표시 / 저장 컬럼 선택", padding=8)
+        selector.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
+        selector.rowconfigure(1, weight=1)
+        selector.columnconfigure(0, weight=1)
+
+        selector_btns = ttk.Frame(selector)
+        selector_btns.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+
+        canvas = tk.Canvas(selector, highlightthickness=0)
+        canvas.grid(row=1, column=0, sticky="nsew")
+        selector_scroll = ttk.Scrollbar(selector, orient="vertical", command=canvas.yview)
+        selector_scroll.grid(row=1, column=1, sticky="ns")
+        canvas.configure(yscrollcommand=selector_scroll.set)
+        checks_frame = ttk.Frame(canvas)
+        canvas_window = canvas.create_window((0, 0), window=checks_frame, anchor="nw")
+
+        def _sync_checks(_event=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            canvas.itemconfigure(canvas_window, width=canvas.winfo_width())
+
+        checks_frame.bind("<Configure>", _sync_checks)
+        canvas.bind("<Configure>", _sync_checks)
+
+        table_box = ttk.Frame(outer)
+        table_box.grid(row=1, column=1, sticky="nsew")
+        table_box.rowconfigure(0, weight=1)
+        table_box.columnconfigure(0, weight=1)
+
+        tree = ttk.Treeview(table_box, columns=(), show="headings", selectmode="extended")
+        tree.grid(row=0, column=0, sticky="nsew")
+        ysb = ttk.Scrollbar(table_box, orient="vertical", command=tree.yview)
+        xsb = ttk.Scrollbar(table_box, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=ysb.set, xscrollcommand=xsb.set)
+        ysb.grid(row=0, column=1, sticky="ns")
+        xsb.grid(row=1, column=0, sticky="ew")
+
+        def current_columns() -> list[str]:
+            chosen = [col for col in fieldnames if selected_map[col].get()]
+            return chosen if chosen else list(fieldnames[:1])
+
+        def refresh_tree() -> None:
+            cols = current_columns()
+            tree.delete(*tree.get_children())
+            tree.configure(columns=tuple(cols))
+            for col in cols:
+                tree.heading(col, text=col)
+                width = 220 if any(token in col.casefold() for token in ["title", "snippet", "abstract", "url", "doi", "pubmed"]) else 140
+                tree.column(col, width=width, anchor="w", stretch=True)
+            for row in rows:
+                tree.insert("", "end", values=[row.get(col, "") for col in cols])
+            status_label.config(text=f"표시 컬럼: {len(cols)} / {len(fieldnames)} | 행 수: {len(rows)}")
+
+        def select_all_columns() -> None:
+            for var in selected_map.values():
+                var.set(True)
+            refresh_tree()
+
+        def clear_all_columns() -> None:
+            first_col = fieldnames[0] if fieldnames else ""
+            for col, var in selected_map.items():
+                var.set(col == first_col)
+            refresh_tree()
+
+        def selected_row_dicts() -> list[dict[str, str]]:
+            selected = []
+            cols = list(tree.cget("columns"))
+            for item in tree.selection():
+                values = tree.item(item, "values")
+                row_map = {col: (values[i] if i < len(values) else "") for i, col in enumerate(cols)}
+                selected.append(row_map)
+            return selected
+
+        def save_visible_all() -> None:
+            cols = current_columns()
+            self._save_achievement_result_as(csv_path, rows, cols)
+
+        def save_visible_selected_rows() -> None:
+            chosen_rows = selected_row_dicts()
+            if not chosen_rows:
+                messagebox.showwarning("선택 필요", "저장할 결과 행을 먼저 선택하세요.")
+                return
+            cols = current_columns()
+            self._save_achievement_result_as(csv_path, chosen_rows, cols)
+
+        def open_selected_doi() -> None:
+            selected = selected_row_dicts()
+            if not selected:
+                messagebox.showwarning("선택 필요", "DOI를 열 결과 행을 먼저 선택하세요.")
+                return
+            opened = 0
+            for row in selected:
+                url = (row.get("doi_url", "") or "").strip()
+                doi = (row.get("doi", "") or "").strip()
+                if not url and doi:
+                    url = f"https://doi.org/{doi}"
+                if url:
+                    webbrowser.open_new_tab(url)
+                    opened += 1
+            if opened == 0:
+                messagebox.showinfo("안내", "선택된 행에 DOI 링크가 없습니다.")
+
+        def open_selected_pubmed() -> None:
+            selected = selected_row_dicts()
+            if not selected:
+                messagebox.showwarning("선택 필요", "PubMed를 열 결과 행을 먼저 선택하세요.")
+                return
+            opened = 0
+            for row in selected:
+                url = (row.get("pubmed_url", "") or "").strip()
+                pmid = (row.get("pmid", "") or "").strip()
+                if not url and pmid:
+                    url = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+                if url:
+                    webbrowser.open_new_tab(url)
+                    opened += 1
+            if opened == 0:
+                messagebox.showinfo("안내", "선택된 행에 PubMed 링크가 없습니다.")
+
+        ttk.Button(selector_btns, text="전체 선택", command=select_all_columns).pack(side="left")
+        ttk.Button(selector_btns, text="전체 해제", command=clear_all_columns).pack(side="left", padx=4)
+        ttk.Button(selector_btns, text="선택 컬럼 적용", command=refresh_tree).pack(side="left", padx=4)
+
+        for idx, col in enumerate(fieldnames):
+            ttk.Checkbutton(
+                checks_frame,
+                text=col,
+                variable=selected_map[col],
+                command=refresh_tree,
+            ).grid(row=idx, column=0, sticky="w", pady=1)
+
+        top_btns = ttk.Frame(top)
+        top_btns.grid(row=0, column=1, sticky="e")
+        ttk.Button(top_btns, text="닫기", command=_close_result_window).pack(side="right")
+        ttk.Button(top_btns, text="PubMed 연결", command=open_selected_pubmed).pack(side="right", padx=(0, 6))
+        ttk.Button(top_btns, text="DOI 연결", command=open_selected_doi).pack(side="right", padx=(0, 6))
+        ttk.Button(top_btns, text="선택 저장", command=save_visible_selected_rows).pack(side="right", padx=(0, 6))
+        ttk.Button(top_btns, text="전체 저장", command=save_visible_all).pack(side="right", padx=(0, 6))
+
+        status_label = ttk.Label(outer, text="")
+        status_label.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+
+        refresh_tree()
+
+    def _save_achievement_result_as(self, src_path: Path, rows: list[dict[str, str]], fieldnames: list[str]) -> None:
+        out = filedialog.asksaveasfilename(
+            title="성과결과 CSV 다른 이름으로 저장",
+            defaultextension=".csv",
+            initialdir=str(src_path.parent),
+            initialfile=src_path.name,
+            filetypes=[("CSV", "*.csv")],
+        )
+        if not out:
+            return
+        safe_fields = [field for field in fieldnames if field]
+        try:
+            with Path(out).open("w", encoding="utf-8-sig", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=safe_fields)
+                writer.writeheader()
+                for row in rows:
+                    writer.writerow({field: row.get(field, "") for field in safe_fields})
+            self.append_log(f"[PROF-RESULT] 다른 이름으로 저장 완료: {out} | 컬럼 {len(safe_fields)}개")
+        except Exception as exc:
+            messagebox.showerror("오류", f"저장 실패\n{exc}")
+
+    def _show_completion_with_result_button(self, title: str, message: str, result_path: str) -> None:
+        self.append_log(f"[POPUP] 완료 팝업 생성: {result_path}")
+
+        try:
+            if self.completion_popup is not None and self.completion_popup.winfo_exists():
+                self.completion_popup.destroy()
+        except Exception:
+            pass
+
+        win = tk.Toplevel(self.root)
+        self.completion_popup = win
+        win.title(title)
+        win.transient(self.root)
+        win.grab_set()
+        win.resizable(False, False)
+
+        body = ttk.Frame(win, padding=14)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text=message, justify="left").pack(anchor="w")
+
+        btns = ttk.Frame(body)
+        btns.pack(fill="x", pady=(12, 0))
+
+        def open_result() -> None:
+            try:
+                open_btn.config(state="disabled")
+                self.append_log(f"[POPUP] 결과보기 클릭: {result_path}")
+            except Exception:
+                pass
+
+            close_popup()
+            self.open_achievement_result_file(result_path)
+
+
+        def close_popup() -> None:
+            try:
+                win.grab_release()
+            except Exception:
+                pass
+            win.destroy()
+            if self.completion_popup is win:
+                self.completion_popup = None
+
+        open_btn = ttk.Button(btns, text="결과보기", command=open_result)
+        open_btn.pack(side="left")
+        ttk.Button(btns, text="닫기", command=close_popup).pack(side="right")
+
+        win.protocol("WM_DELETE_WINDOW", close_popup)
+        win.update_idletasks()
+        x = self.root.winfo_rootx() + max(40, (self.root.winfo_width() - win.winfo_width()) // 2)
+        y = self.root.winfo_rooty() + max(40, (self.root.winfo_height() - win.winfo_height()) // 2)
+        win.geometry(f"+{x}+{y}")
+
+    def _open_results_editor(self, rows: list[ProfessorResultRow], *, source_label: str = "수집 결과", source_file: str | None = None) -> None:
+        win = tk.Toplevel(self.root)
+        win.title(source_label)
+        win.geometry("1380x760")
 
         current_rows = list(rows)
         current_file = {"path": source_file or ""}
 
-        top = ttk.Frame(host, padding=(0, 0, 0, 8))
+        top = ttk.Frame(win, padding=8)
         top.pack(fill="x")
-        title_var = tk.StringVar(value=source_label)
-        count_var = tk.StringVar(value=f"총 {len(current_rows)}명")
-        ttk.Label(top, textvariable=title_var).pack(side="left")
-        ttk.Label(top, textvariable=count_var).pack(side="right")
+        ttk.Label(top, text=source_label).pack(side="left")
 
-        btns = ttk.Frame(host, padding=(0, 0, 0, 8))
+        btns = ttk.Frame(win, padding=(8,0))
         btns.pack(fill="x")
-        tree_frame = ttk.Frame(host)
+        tree_frame = ttk.Frame(win, padding=8)
         tree_frame.pack(fill="both", expand=True)
 
         columns = ("keep", "group", "department", "name", "query", "title", "email", "match_status", "review_status")
@@ -653,77 +1073,15 @@ class ProfessorManagerApp:
         vsb.pack(side="right", fill="y")
         hsb.pack(side="bottom", fill="x")
 
-        def sync_keep_marks() -> None:
-            selected = set(tree.selection())
-            for item in tree.get_children():
-                tree.set(item, "keep", "☑" if item in selected else "☐")
-            count_var.set(f"총 {len(current_rows)}명 | 선택 {len(selected)}명")
-
-        def refresh(selected_idxs: list[int] | None = None) -> None:
+        def refresh() -> None:
             for item in tree.get_children():
                 tree.delete(item)
-            new_items = []
             for row in current_rows:
-                item = tree.insert("", "end", values=("☐", row.group, row.department, row.name, row.query, row.title, row.email, row.match_status, row.review_status))
-                new_items.append(item)
-            if selected_idxs:
-                valid_items = [new_items[i] for i in selected_idxs if 0 <= i < len(new_items)]
-                if valid_items:
-                    tree.selection_set(valid_items)
-            sync_keep_marks()
+                tree.insert("", "end", values=("☐", row.group, row.department, row.name, row.query, row.title, row.email, row.match_status, row.review_status))
 
         def selected_indices() -> list[int]:
             items = tree.selection()
             return [tree.index(i) for i in items]
-
-        def toggle_keep_at(event=None) -> None:
-            region = tree.identify("region", event.x, event.y)
-            if region != "cell":
-                return
-            column = tree.identify_column(event.x)
-            if column != "#1":
-                return
-            item = tree.identify_row(event.y)
-            if not item:
-                return
-            if item in tree.selection():
-                tree.selection_remove(item)
-            else:
-                tree.selection_add(item)
-            sync_keep_marks()
-            return "break"
-
-        toggle_select_btn = None
-
-        def update_toggle_select_button() -> None:
-            nonlocal toggle_select_btn
-            if toggle_select_btn is None:
-                return
-            items = tree.get_children()
-            selected = tree.selection()
-            if items and len(selected) == len(items):
-                toggle_select_btn.configure(text="전체 해제")
-            else:
-                toggle_select_btn.configure(text="전체 선택")
-
-        def toggle_all_selection() -> None:
-            items = tree.get_children()
-            if not items:
-                return
-            selected = tree.selection()
-            if len(selected) == len(items):
-                tree.selection_remove(selected)
-            else:
-                tree.selection_set(items)
-            sync_keep_marks()
-            update_toggle_select_button()
-
-        tree.bind("<Button-1>", toggle_keep_at, add="+")
-        tree.bind(
-            "<<TreeviewSelect>>",
-            lambda _e: (sync_keep_marks(), update_toggle_select_button()),
-            add="+",
-        )
 
         def delete_selected() -> None:
             idxs = sorted(selected_indices(), reverse=True)
@@ -741,7 +1099,7 @@ class ProfessorManagerApp:
             export_professor_results_csv(path, current_rows)
             current_file['path'] = path
             self.professors_csv_var.set(path)
-            title_var.set(Path(path).name)
+            self.load_achievement_professor_list()
             self.append_log(f"[YONSEI-EDIT] 저장 완료: {path} | {len(current_rows)}명")
 
         def save_selected() -> None:
@@ -781,47 +1139,69 @@ class ProfessorManagerApp:
                 return
             current_file['path'] = path
             self.professors_csv_var.set(path)
-            title_var.set(Path(path).name)
+            self.load_achievement_professor_list()
             current_rows.clear()
             current_rows.extend(loaded)
             refresh()
             self.append_log(f"[YONSEI-EDIT] 교수명단 열기 완료: {path} | {len(loaded)}명")
 
-        toggle_select_btn = ttk.Button(btns, text="전체 선택", command=toggle_all_selection)
-        toggle_select_btn.pack(side="left", padx=4)
         ttk.Button(btns, text="선택 삭제", command=delete_selected).pack(side="left", padx=4)
         ttk.Button(btns, text="현재 목록 저장", command=save_all).pack(side="left", padx=4)
         ttk.Button(btns, text="선택만 저장", command=save_selected).pack(side="left", padx=4)
         ttk.Button(btns, text="현재 파일 다시 불러오기", command=reload_current).pack(side="left", padx=4)
         ttk.Button(btns, text="다른 파일 열기", command=open_other).pack(side="left", padx=4)
         refresh()
-        update_toggle_select_button()
 
     def export_achievements(self) -> None:
+        if self.achievement_job_running:
+            messagebox.showwarning("작업 진행 중", "이미 성과 CSV 생성 작업이 진행 중입니다.")
+            return
+
+        self.achievement_job_running = True
+        self._set_achievement_buttons_enabled(False)
+
         professors_file = self.professors_csv_var.get().strip()
         if not professors_file:
+            self.achievement_job_running = False
+            self._set_achievement_buttons_enabled(True)
             messagebox.showwarning("교수 목록 필요", "교수명단 CSV를 선택하세요.")
             return
         try:
             per_limit = int(self.limit_var.get().strip() or "20")
         except ValueError:
+            self.achievement_job_running = False
+            self._set_achievement_buttons_enabled(True)
             messagebox.showwarning("입력 오류", "교수당 최대 논문 수는 숫자여야 합니다.")
             return
         default_dir = Path(self.output_dir_var.get().strip() or str(Path.home()))
         group = self.ach_group_var.get().strip() or "전체"
         out = filedialog.asksaveasfilename(title="교수성과 CSV 저장", defaultextension=".csv", initialdir=str(default_dir), initialfile=f"professor_achievements_{time.strftime('%Y%m%d_%H%M%S')}.csv", filetypes=[("CSV", "*.csv")])
         if not out:
+            self.achievement_job_running = False
+            self._set_achievement_buttons_enabled(True)
             return
 
         self.append_log(f"[PROF] 성과 조회 시작 | 구분={group} | 파일={professors_file}")
+
         def worker() -> None:
             try:
                 result = export_professor_achievements_csv(professors_file, out, email=self.email_var.get().strip(), per_professor_limit=per_limit, group_filter=group, logger=self.append_log)
-                self.root.after(0, lambda: self.status_var.set(f"교수성과 CSV 생성 완료: {result.get('papers', 0)}건"))
-                self.root.after(0, lambda: messagebox.showinfo("완료", f"교수성과 CSV 생성 완료\n{out}"))
+                def done() -> None:
+                    self.append_log(f"[PROF] 전체 성과 완료 콜백 실행: {out}")
+                    self.achievement_result_csv_var.set(out)
+                    self.status_var.set(f"교수성과 CSV 생성 완료: {result.get('papers', 0)}건")
+                    self._show_completion_with_result_button(
+                        "완료",
+                        f"교수성과 CSV 생성 완료\n{out}",
+                        out,
+                    )
+                self.root.after(0, done)
             except Exception as exc:
                 self.append_log(f"[PROF-ERROR] {exc}")
                 self.root.after(0, lambda: messagebox.showerror("오류", str(exc)))
+            finally:
+                self.root.after(0, lambda: setattr(self, "achievement_job_running", False))
+                self.root.after(0, lambda: self._set_achievement_buttons_enabled(True))
         threading.Thread(target=worker, daemon=True).start()
 
     def save_settings(self) -> None:
