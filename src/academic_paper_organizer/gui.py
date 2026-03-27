@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import csv
@@ -108,8 +109,6 @@ class ProfessorManagerApp:
         self.achievement_prof_tree = None
         self.achievement_job_running = False
         self.completion_popup = None
-        self.result_window = None
-        self.result_window_path = ""
         self.log_queue: queue.Queue[str] = queue.Queue()
         self.sort_state: dict[str, dict[str, bool]] = {}
         self.tree_heading_texts: dict[str, dict[str, str]] = {}
@@ -729,7 +728,6 @@ class ProfessorManagerApp:
                     logger=self.append_log,
                 )
                 def done() -> None:
-                    self.append_log(f"[PROF] 선택 성과 완료 콜백 실행: {out}")
                     self.achievement_result_csv_var.set(out)
                     self.status_var.set(f"선택 개인 성과 CSV 생성 완료: {result.get('papers', 0)}건")
                     self._show_completion_with_result_button(
@@ -753,8 +751,6 @@ class ProfessorManagerApp:
 
     def open_achievement_result_file(self, path: str | None = None) -> None:
         target = str(path or self.achievement_result_csv_var.get().strip() or "").strip()
-        self.append_log(f"[RESULT] open_achievement_result_file 호출: {target}")
-
         if not target:
             target = filedialog.askopenfilename(
                 title="성과결과 CSV 열기",
@@ -771,21 +767,6 @@ class ProfessorManagerApp:
             return
 
         try:
-            if self.result_window is not None and self.result_window.winfo_exists():
-                if self.result_window_path == str(csv_path):
-                    self.append_log(f"[RESULT] 이미 열린 결과창 재사용: {csv_path}")
-                    self.result_window.lift()
-                    self.result_window.focus_force()
-                    return
-                else:
-                    self.append_log(f"[RESULT] 기존 결과창 닫고 새 파일 열기: {csv_path}")
-                    self.result_window.destroy()
-        except Exception:
-            pass
-
-        self.append_log(f"[RESULT] 결과창 생성 시작: {csv_path}")
-
-        try:
             with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
                 reader = csv.DictReader(f)
                 fieldnames = list(reader.fieldnames or [])
@@ -795,18 +776,6 @@ class ProfessorManagerApp:
             return
 
         win = tk.Toplevel(self.root)
-        self.result_window = win
-        self.result_window_path = str(csv_path)
-
-        def _close_result_window() -> None:
-            try:
-                win.destroy()
-            finally:
-                if self.result_window is win:
-                    self.result_window = None
-                    self.result_window_path = ""
-
-        win.protocol("WM_DELETE_WINDOW", _close_result_window)
         win.title(f"교수성과 결과 | {csv_path.name}")
         win.geometry("1500x820")
 
@@ -957,7 +926,7 @@ class ProfessorManagerApp:
 
         top_btns = ttk.Frame(top)
         top_btns.grid(row=0, column=1, sticky="e")
-        ttk.Button(top_btns, text="닫기", command=_close_result_window).pack(side="right")
+        ttk.Button(top_btns, text="닫기", command=win.destroy).pack(side="right")
         ttk.Button(top_btns, text="PubMed 연결", command=open_selected_pubmed).pack(side="right", padx=(0, 6))
         ttk.Button(top_btns, text="DOI 연결", command=open_selected_doi).pack(side="right", padx=(0, 6))
         ttk.Button(top_btns, text="선택 저장", command=save_visible_selected_rows).pack(side="right", padx=(0, 6))
@@ -990,8 +959,6 @@ class ProfessorManagerApp:
             messagebox.showerror("오류", f"저장 실패\n{exc}")
 
     def _show_completion_with_result_button(self, title: str, message: str, result_path: str) -> None:
-        self.append_log(f"[POPUP] 완료 팝업 생성: {result_path}")
-
         try:
             if self.completion_popup is not None and self.completion_popup.winfo_exists():
                 self.completion_popup.destroy()
@@ -1013,15 +980,7 @@ class ProfessorManagerApp:
         btns.pack(fill="x", pady=(12, 0))
 
         def open_result() -> None:
-            try:
-                open_btn.config(state="disabled")
-                self.append_log(f"[POPUP] 결과보기 클릭: {result_path}")
-            except Exception:
-                pass
-
-            close_popup()
             self.open_achievement_result_file(result_path)
-
 
         def close_popup() -> None:
             try:
@@ -1032,8 +991,7 @@ class ProfessorManagerApp:
             if self.completion_popup is win:
                 self.completion_popup = None
 
-        open_btn = ttk.Button(btns, text="결과보기", command=open_result)
-        open_btn.pack(side="left")
+        ttk.Button(btns, text="결과보기", command=open_result).pack(side="left")
         ttk.Button(btns, text="닫기", command=close_popup).pack(side="right")
 
         win.protocol("WM_DELETE_WINDOW", close_popup)
@@ -1187,7 +1145,6 @@ class ProfessorManagerApp:
             try:
                 result = export_professor_achievements_csv(professors_file, out, email=self.email_var.get().strip(), per_professor_limit=per_limit, group_filter=group, logger=self.append_log)
                 def done() -> None:
-                    self.append_log(f"[PROF] 전체 성과 완료 콜백 실행: {out}")
                     self.achievement_result_csv_var.set(out)
                     self.status_var.set(f"교수성과 CSV 생성 완료: {result.get('papers', 0)}건")
                     self._show_completion_with_result_button(
